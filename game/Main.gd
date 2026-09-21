@@ -1,5 +1,7 @@
 extends Node2D
 
+signal audio_cue_requested(cue: String)
+
 enum Phase { MENU, COMBAT, UPGRADE, DEFENSE, VICTORY, DEFEAT, PAUSED }
 
 const VIEW_SIZE := Vector2(1280, 720)
@@ -97,22 +99,20 @@ func _process(delta: float) -> void:
 	_update_hud()
 	queue_redraw()
 
-func _unhandled_input(event: InputEvent) -> void:
-	if event.is_action_pressed("pause_game"):
+func _input(event: InputEvent) -> void:
+	var key_event := event as InputEventKey
+	if event.is_action_pressed("pause_game") or (key_event != null and key_event.pressed and key_event.keycode == KEY_ESCAPE):
 		_toggle_pause()
 		get_viewport().set_input_as_handled()
 		return
 	if phase == Phase.PAUSED or phase == Phase.MENU or phase == Phase.VICTORY or phase == Phase.DEFEAT or phase == Phase.UPGRADE:
 		return
-	if event.is_action_pressed("select_slot_1"):
+	if event.is_action_pressed("select_slot_1") or (key_event != null and key_event.pressed and (key_event.keycode == KEY_1 or key_event.physical_keycode == KEY_1)):
 		_select_weapon(0)
-	elif event.is_action_pressed("select_slot_2"):
+		get_viewport().set_input_as_handled()
+	elif event.is_action_pressed("select_slot_2") or (key_event != null and key_event.pressed and (key_event.keycode == KEY_2 or key_event.physical_keycode == KEY_2)):
 		_select_weapon(1)
-	if phase == Phase.DEFENSE and event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT:
-		if event.pressed:
-			_begin_defense_click(event.position)
-		else:
-			_finish_drag()
+		get_viewport().set_input_as_handled()
 	if OS.is_debug_build() and event is InputEventKey and event.pressed and not event.echo:
 		match event.keycode:
 			KEY_F5:
@@ -124,6 +124,13 @@ func _unhandled_input(event: InputEvent) -> void:
 				if not cities.is_empty(): cities[selected_city_index].take_damage(25.0)
 			KEY_F8:
 				_debug_kill_enemies()
+
+func _unhandled_input(event: InputEvent) -> void:
+	if phase == Phase.DEFENSE and event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT:
+		if event.pressed:
+			_begin_defense_click(event.position)
+		else:
+			_finish_drag()
 
 func _draw() -> void:
 	draw_rect(Rect2(Vector2.ZERO, VIEW_SIZE), Color("081326"))
@@ -197,7 +204,7 @@ func _build_ui() -> void:
 	gatling_button = _button(defense_panel, "BUY GATLING — 80", Rect2(18, 199, 314, 38), _buy_gatling)
 	missile_upgrade_button = _button(defense_panel, "UPGRADE MISSILE — 50", Rect2(18, 242, 314, 38), _buy_missile_upgrade)
 	gatling_upgrade_button = _button(defense_panel, "UPGRADE GATLING — 50", Rect2(18, 285, 314, 38), _buy_gatling_upgrade)
-	charm_button = _button(defense_panel, "BUY CHARM — 40", Rect2(18, 328, 314, 38), _buy_charm)
+	charm_button = _button(defense_panel, "BUY CHARM — %d" % GameBalance.CHARM_COST, Rect2(18, 328, 314, 38), _buy_charm)
 	defense_weapons_label = _label(defense_panel, "", 13, Color("9fb4cd"), Rect2(18, 373, 314, 40))
 	defense_charms_label = _label(defense_panel, "", 13, Color("c58cff"), Rect2(18, 416, 314, 38))
 	next_wave_button = _button(defense_panel, "START NEXT WAVE", Rect2(18, 460, 314, 38), _start_next_wave)
@@ -330,6 +337,7 @@ func _begin_wave(number: int) -> void:
 	upgrade_panel.visible = false
 	result_panel.visible = false
 	_show_banner("WAVE %d" % current_wave, 1.8)
+	audio_cue_requested.emit("wave_start")
 	_refresh_defense_ui()
 
 func _process_spawning(delta: float) -> void:
@@ -400,6 +408,7 @@ func _process_firing() -> void:
 		projectile.bullet_hit.connect(_on_bullet_hit)
 	projectiles.append(projectile)
 	_add_effect(weapon.muzzle_position(), 12.0, 0.12, Color("ffe66d"))
+	audio_cue_requested.emit("missile_launch" if shot.type == "missile" else "gatling_fire")
 
 func _living_enemies() -> Array[EnemyThreat]:
 	var living: Array[EnemyThreat] = []
@@ -418,6 +427,7 @@ func _on_missile_exploded(_projectile, at_position: Vector2, damage: float, radi
 
 func _apply_explosion(at_position: Vector2, damage: float, radius: float) -> void:
 	_add_effect(at_position, radius, 0.34, Color("62e8ff"))
+	audio_cue_requested.emit("explosion")
 	for enemy in _living_enemies():
 		if enemy.position.distance_to(at_position) <= radius + enemy.radius:
 			var falloff := clampf(1.25 - enemy.position.distance_to(at_position) / maxf(radius, 1.0), 0.35, 1.0)
@@ -451,10 +461,11 @@ func _on_enemy_removed(threat, killed: bool, reward: int) -> void:
 	enemies.erase(threat)
 	if killed:
 		_add_effect(death_position, 30.0 if not was_boss else 95.0, 0.45, threat.visual_color)
+		audio_cue_requested.emit("enemy_destroyed")
 		_spawn_pickup("credits", reward, death_position)
-		if randf() < 0.08:
+		if randf() < GameBalance.COMPONENT_DROP_CHANCE:
 			_spawn_pickup("component", 1, death_position + Vector2(12, 0))
-		if not was_boss and randf() < 0.07:
+		if not was_boss and randf() < GameBalance.POWERUP_DROP_CHANCE:
 			_spawn_pickup("rapid", 1, death_position + Vector2(-12, 0))
 	if was_boss and killed:
 		for enemy in enemies.duplicate():
@@ -494,7 +505,7 @@ func _on_pickup_collected(pickup, kind: String, amount: int) -> void:
 			persistent_components += amount
 			_save_persistent()
 		"rapid":
-			rapid_fire_left = maxf(rapid_fire_left, 10.0)
+			rapid_fire_left = maxf(rapid_fire_left, GameBalance.RAPID_FIRE_DURATION)
 			_show_banner("RAPID FIRE", 1.2)
 
 func _collect_all_pickups() -> void:
@@ -630,6 +641,7 @@ func _repair_city() -> void:
 	var city := cities[selected_city_index]
 	if credits >= GameBalance.CITY_REPAIR_COST and city.repair(GameBalance.CITY_REPAIR_AMOUNT):
 		credits -= GameBalance.CITY_REPAIR_COST
+		audio_cue_requested.emit("upgrade_purchase")
 		_show_banner("CITY REPAIRED", 0.9)
 	_refresh_defense_ui()
 
@@ -637,6 +649,7 @@ func _buy_shield() -> void:
 	var city := cities[selected_city_index]
 	if credits >= GameBalance.SHIELD_COST and city.install_shield():
 		credits -= GameBalance.SHIELD_COST
+		audio_cue_requested.emit("shield_online")
 		_show_banner("SHIELD ONLINE", 0.9)
 	_refresh_defense_ui()
 
@@ -646,6 +659,7 @@ func _buy_gatling() -> void:
 	credits -= GameBalance.GATLING_COST
 	weapons[1].unlocked = true
 	weapons[1].queue_redraw()
+	audio_cue_requested.emit("upgrade_purchase")
 	_show_banner("GATLING UNLOCKED — PRESS 2", 1.4)
 	_refresh_defense_ui()
 
@@ -656,6 +670,7 @@ func _buy_missile_upgrade() -> void:
 	credits -= GameBalance.WEAPON_UPGRADE_COST
 	weapons[0].apply_upgrade(ids[missile_upgrade_cursor % ids.size()])
 	missile_upgrade_cursor += 1
+	audio_cue_requested.emit("upgrade_purchase")
 	_refresh_defense_ui()
 
 func _buy_gatling_upgrade() -> void:
@@ -665,15 +680,17 @@ func _buy_gatling_upgrade() -> void:
 	credits -= GameBalance.WEAPON_UPGRADE_COST
 	weapons[1].apply_upgrade(ids[gatling_upgrade_cursor % ids.size()])
 	gatling_upgrade_cursor += 1
+	audio_cue_requested.emit("upgrade_purchase")
 	_refresh_defense_ui()
 
 func _buy_charm() -> void:
-	if credits < 40:
+	if credits < GameBalance.CHARM_COST:
 		return
 	for charm_name in ["Targeting Computer", "Cooling Unit", "Reinforced Concrete"]:
 		if charm_name not in charms:
-			credits -= 40
+			credits -= GameBalance.CHARM_COST
 			_add_charm(charm_name)
+			audio_cue_requested.emit("upgrade_purchase")
 			_show_banner(charm_name.to_upper(), 1.0)
 			break
 	_refresh_defense_ui()
@@ -684,6 +701,7 @@ func _start_next_wave() -> void:
 		_begin_wave(current_wave + 1)
 
 func _on_city_fell(_city) -> void:
+	audio_cue_requested.emit("city_destroyed")
 	var all_destroyed := true
 	for city in cities:
 		if not city.destroyed:
@@ -697,6 +715,7 @@ func _victory() -> void:
 		return
 	waves_cleared = 10
 	phase = Phase.VICTORY
+	audio_cue_requested.emit("victory")
 	_stop_combat_nodes()
 	_show_result(true)
 
@@ -704,6 +723,7 @@ func _defeat() -> void:
 	if phase == Phase.DEFEAT:
 		return
 	phase = Phase.DEFEAT
+	audio_cue_requested.emit("defeat")
 	_stop_combat_nodes()
 	_show_result(false)
 
@@ -769,7 +789,7 @@ func _refresh_defense_ui() -> void:
 	gatling_button.text = "GATLING OWNED" if weapons[1].unlocked else "BUY GATLING — 80"
 	missile_upgrade_button.disabled = credits < GameBalance.WEAPON_UPGRADE_COST
 	gatling_upgrade_button.disabled = credits < GameBalance.WEAPON_UPGRADE_COST or not weapons[1].unlocked
-	charm_button.disabled = credits < 40 or charms.size() >= 3
+	charm_button.disabled = credits < GameBalance.CHARM_COST or charms.size() >= 3
 	defense_weapons_label.text = "Missile: %s\nGatling: %s" % [", ".join(weapons[0].upgrade_labels) if not weapons[0].upgrade_labels.is_empty() else "base", ", ".join(weapons[1].upgrade_labels) if not weapons[1].upgrade_labels.is_empty() else ("base" if weapons[1].unlocked else "locked")]
 	defense_charms_label.text = "Charms: %s" % (", ".join(charms) if not charms.is_empty() else "none")
 	next_wave_button.text = "START WAVE %d" % (current_wave + 1)
