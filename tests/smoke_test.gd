@@ -38,6 +38,12 @@ func _run() -> void:
 	check(game.weapons[1].kind == PlayerWeapon.Kind.MISSILE and not game.weapons[1].unlocked, "The Missile Launcher must begin locked")
 	check(game.inventory.amount(RunInventory.GATLING_AMMO) == 1000, "Basic MG must start with 1000 rounds")
 	check(game.inventory.amount(RunInventory.MISSILE_AMMO) == 3 and game.inventory.capacity(RunInventory.MISSILE_AMMO) == 6, "Missiles must start scarce at 3 of 6")
+	check(factory.defense_weapons[0] == game.weapons[0] and factory.defense_weapons[1] == game.weapons[1], "Factory front nodes must reference the exact combat weapon objects")
+	check(factory.defense_cities[0] == game.cities[0] and factory.defense_front_cell_for_weapon(0).y == FactoryWorld.DEFENSE_FRONT_ROW, "The northern front must reference the exact combat cities and weapons")
+	var original_mg_front_cell := factory.defense_front_cell_for_weapon(0)
+	game.weapons[0].position.x += 96.0
+	check(factory.defense_front_cell_for_weapon(0) != original_mg_front_cell, "Defense weapon placement must update its strategic front position")
+	game.weapons[0].position.x -= 96.0
 
 	var initial_fog_count: int = factory.explored_cells.size()
 	factory._reveal_around(Vector2i(45, 25), GameBalance.FOG_REVEAL_RADIUS)
@@ -71,21 +77,34 @@ func _run() -> void:
 	factory.refill_stamina()
 	check(_place(factory, "storage", Vector2i(35, 26)), "Storage must place on explored open terrain")
 	check(game.inventory.capacity(RunInventory.GATLING_AMMO) == 2000 and game.inventory.capacity(RunInventory.MISSILE_AMMO) == 10, "Storage must expand both ammunition capacities")
+	var ammo_storage: Dictionary = factory.structures.back()
+	check(_place(factory, "belt", Vector2i(36, 26), 0), "Storage must support a physical output belt")
+	check(factory._store_ammo_packet(ammo_storage, RunInventory.GATLING_AMMO, 50), "Storage must buffer physical ammunition packets")
 	var drill_cell := Vector2i(40, 20)
 	factory.exposed_veins[drill_cell] = "ore"
 	factory.vein_amounts[drill_cell] = 12
-	for x in range(40, 45): factory.explored_cells[Vector2i(x, 20)] = true
+	for x in range(40, 47):
+		factory.explored_cells[Vector2i(x, 20)] = true
+		factory.explored_cells[Vector2i(x, 21)] = true
 	check(_place(factory, "drill", drill_cell, 0), "Mining Drill must place on an exposed vein")
 	check(_place(factory, "belt", Vector2i(41, 20), 0), "First directional belt must place")
 	check(_place(factory, "belt", Vector2i(42, 20), 0), "Second directional belt must place")
-	check(_place(factory, "ammo_factory", Vector2i(43, 20)), "Ammo Factory must place at the belt output")
-	check(_place(factory, "missile_factory", Vector2i(44, 20)), "Missile Factory must place on open terrain")
+	check(_place(factory, "ammo_factory", Vector2i(43, 20), 1), "Ammo Factory must place at the belt output")
+	check(_place(factory, "belt", Vector2i(43, 21), 0), "Ammo Factory must have a physical output belt")
+	check(_place(factory, "missile_factory", Vector2i(44, 20), 1), "Missile Factory must place on open terrain")
+	check(_place(factory, "belt", Vector2i(44, 21), 0), "Missile Factory must have a physical output belt")
 	var missile_factory: Dictionary = factory.structures.back()
 	missile_factory.ore_buffer = 2
 	var paused_timer := float(missile_factory.timer)
 	factory.simulation_active = false
 	factory.simulate_factory(10.0)
 	check(float(missile_factory.timer) == paused_timer, "Factory timers must not advance during preparation")
+	var mg_front_cell := factory.defense_front_cell_for_weapon(0)
+	var mg_input_cell := mg_front_cell + Vector2i.DOWN
+	check(_place(factory, "belt", mg_input_cell, 3), "A belt must connect physically to the Basic MG depot")
+	var missile_front_cell := factory.defense_front_cell_for_weapon(1)
+	var missile_input_cell := missile_front_cell + Vector2i.DOWN
+	check(_place(factory, "belt", missile_input_cell, 3), "A belt must connect physically to the Missile silo")
 
 	game._toggle_preparation_view()
 	check(game.phase == game.Phase.PREPARATION and not game.factory_view_active and not factory.simulation_active, "Tab must inspect Defense without starting combat or production")
@@ -95,22 +114,40 @@ func _run() -> void:
 	check(game.phase == game.Phase.DEFENSE and factory.simulation_active and not factory.visible, "Starting a wave must hide Factory controls but activate off-screen simulation")
 	var mg_before_production: int = game.inventory.amount(RunInventory.GATLING_AMMO)
 	factory.simulate_factory(GameBalance.DRILL_INTERVAL + 0.1)
+	check(Array(ammo_storage.packet_buffer).is_empty() and factory.packets.any(func(packet): return packet.resource == RunInventory.GATLING_AMMO and int(packet.quantity) == 50), "Storage must dispatch its buffered ammunition onto the configured belt")
 	factory.simulate_factory(GameBalance.BELT_STEP_TIME + 0.02)
 	factory.simulate_factory(GameBalance.BELT_STEP_TIME + 0.02)
 	var ammo_factory: Dictionary = factory.structures[factory.structures.size() - 2]
 	check(int(ammo_factory.ore_buffer) >= 1, "Belts must logically deliver mined Ore to the Ammo Factory")
 	factory.simulate_factory(GameBalance.MISSILE_FACTORY_INTERVAL + 0.1)
-	check(game.inventory.amount(RunInventory.GATLING_AMMO) >= mg_before_production + 125, "Ammo Factory must create MG rounds during combat")
-	check(game.inventory.amount(RunInventory.MISSILE_AMMO) == 4, "Missile Factory must consume 2 Ore over 25 active-combat seconds for one missile")
+	check(factory.packets.any(func(packet): return packet.resource == RunInventory.GATLING_AMMO and int(packet.quantity) == 125), "Ammo Factory must emit a physical MG-ammo packet instead of filling a remote inventory")
+	check(factory.packets.any(func(packet): return packet.resource == RunInventory.MISSILE_AMMO and int(packet.quantity) == 1), "Missile Factory must emit a physical missile packet")
+	check(game.inventory.amount(RunInventory.GATLING_AMMO) == mg_before_production and game.inventory.amount(RunInventory.MISSILE_AMMO) == 3, "Produced ammunition must not become usable before reaching its exact front node")
+	factory.packets.append({"cell": mg_input_cell, "progress": 0.99, "resource": RunInventory.GATLING_AMMO, "quantity": 125})
+	factory.simulate_factory(GameBalance.BELT_STEP_TIME + 0.02)
+	check(game.inventory.amount(RunInventory.GATLING_AMMO) == mg_before_production + 125, "The linked Basic MG must load only the MG packet delivered to its strategic node")
+	var missiles_before_wrong_delivery: int = game.inventory.amount(RunInventory.MISSILE_AMMO)
+	var wrong_packet: Dictionary = {"cell": mg_input_cell, "progress": 0.99, "resource": RunInventory.MISSILE_AMMO, "quantity": 1}
+	factory.packets.append(wrong_packet)
+	factory.simulate_factory(GameBalance.BELT_STEP_TIME + 0.02)
+	check(game.inventory.amount(RunInventory.MISSILE_AMMO) == missiles_before_wrong_delivery and factory.packets.has(wrong_packet), "The Basic MG depot must reject missile packets intended for another exact weapon")
+	factory.packets.erase(wrong_packet)
+	factory.packets.append({"cell": missile_input_cell, "progress": 0.99, "resource": RunInventory.MISSILE_AMMO, "quantity": 1})
+	factory.simulate_factory(GameBalance.BELT_STEP_TIME + 0.02)
+	check(game.inventory.amount(RunInventory.MISSILE_AMMO) == 4, "The linked Missile Launcher must load only the missile delivered to its strategic node")
+	var front_snapshot := factory.defense_front_snapshot(0)
+	check(front_snapshot.weapon == game.weapons[0] and int(front_snapshot.ammo) == game.inventory.amount(RunInventory.GATLING_AMMO), "Factory and Defense views must expose one synchronized weapon identity and ammo count")
 
 	game.weapons[0].aim_position = Vector2(600, 240)
 	game.weapons[0].cooldown_left = 0.0
 	var mg_before_shot: int = game.inventory.amount(RunInventory.GATLING_AMMO)
 	check(game._attempt_fire_weapon(game.weapons[0]) and game.inventory.amount(RunInventory.GATLING_AMMO) == mg_before_shot - 1, "Basic MG manual fire must consume exactly one round")
+	check(int(factory.defense_front_snapshot(0).ammo) == mg_before_shot - 1, "Factory-front MG ammo must update immediately when that exact combat gun fires")
 	game.credits = 100
 	game.current_wave = 1
 	game._buy_gatling()
 	check(game.weapons[1].unlocked and game.credits == 40, "Missile Launcher must unlock after wave one for 60 Credits")
+	check(bool(factory.defense_front_snapshot(1).unlocked), "Missile unlock state must synchronize to the same Factory-front node")
 	game.weapons[1].aim_position = Vector2(620, 220)
 	game.weapons[1].cooldown_left = 0.0
 	var missiles_before_shot: int = game.inventory.amount(RunInventory.MISSILE_AMMO)

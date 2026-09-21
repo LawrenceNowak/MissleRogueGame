@@ -10,6 +10,8 @@ Runs begin on a separate top-down Factory screen. Explore persistent fog with th
 
 Ending preparation manually or reaching zero stamina triggers a short incoming-attack warning and switches to the existing Defense screen. Factory production is frozen during preparation and advances only during active combat, even while its scene is hidden. Clearing a wave immediately returns to the persistent Factory map with full stamina. The Basic MG starts unlocked with 1000 rounds; the Missile Launcher is a 60-Credit early unlock with only three missiles and slow 25-second combat-time production.
 
+The northern edge of the Factory map is the strategic Defense Front. Its five city markers and two weapon nodes reference the exact city and weapon objects used by the Defense view, so health, shields, unlocks, selection, placement, upgrades, and ammunition remain synchronized. Ammo and missile factories now emit physical colored packets: route their output belts directly, or through a rotated Storage buffer, into the matching Basic MG depot or Missile node. Ammunition becomes usable in combat only after the correct packet reaches that live node.
+
 The existing five cities, manual aiming, enemies, shields, upgrades, Missile Carrier boss, victory, defeat, and persistent Components remain intact. The mandatory milestone reward modal is bypassed in normal progression.
 
 Credits and combat upgrades reset on a new run. Generic Components are saved under `user://` and persist across victory, defeat, and relaunch.
@@ -17,6 +19,7 @@ Credits and combat upgrades reset on a new run. Generic Components are saved und
 ## Controls
 
 - Factory: `WASD` move, `E` interact/dig/harvest/Command Center
+- Factory front: `E` beside an unlocked weapon node selects that same combat weapon
 - Factory: choose a toolbar building, left click to place, `R` rotate
 - Factory: right click removes a belt or cancels placement; `Esc` cancels placement
 - Preparation: `Tab` switches between Factory and Command inspection without starting combat

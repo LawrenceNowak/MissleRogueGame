@@ -45,6 +45,7 @@ const AMMO_FACTORY_OUTPUT := 125
 const MISSILE_FACTORY_ORE_COST := 2
 const MISSILE_FACTORY_OUTPUT := 1
 const BELT_STEP_TIME := 0.32
+const STORAGE_PACKET_CAPACITY := 8
 const BUILD_RECIPES := {
 	"drill": {"wood": 3, "stone": 6, "ore": 0, "stamina": STAMINA_DRILL},
 	"belt": {"wood": 0, "stone": 1, "ore": 0, "stamina": STAMINA_BELT},

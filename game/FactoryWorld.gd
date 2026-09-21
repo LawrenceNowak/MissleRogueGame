@@ -5,12 +5,15 @@ signal wave_requested(reason: String)
 signal message_requested(text: String)
 signal credits_found(amount: int)
 signal state_changed
+signal weapon_selected(index: int)
 
 const CELL := GameBalance.FACTORY_CELL_SIZE
 const MAP_CELLS := GameBalance.FACTORY_MAP_CELLS
 const VIEW_SIZE := Vector2(1280.0, 720.0)
 const COMMAND_CELL := Vector2i(32, 20)
 const DIRECTIONS := [Vector2i.RIGHT, Vector2i.DOWN, Vector2i.LEFT, Vector2i.UP]
+const DEFENSE_FRONT_ROW := 3
+const DEFENSE_FRONT_DEPTH := 7
 
 const ENGINEER_TEXTURE: Texture2D = preload("res://assets/stranded/engineer.png")
 const TERRAIN_TEXTURE: Texture2D = preload("res://assets/stranded/terrain_tileset.png")
@@ -26,6 +29,8 @@ const MISSILE_FACTORY_TEXTURE: Texture2D = preload("res://assets/stranded/missil
 const STORAGE_TEXTURE: Texture2D = preload("res://assets/stranded/storage.png")
 const COMMAND_TEXTURE: Texture2D = preload("res://assets/stranded/command_center.png")
 const CRATE_TEXTURE: Texture2D = preload("res://assets/stranded/crate.png")
+const DEFENSE_GUN_TEXTURE: Texture2D = preload("res://assets/stranded/defense_gun_turret.png")
+const DEFENSE_MISSILE_TEXTURE: Texture2D = preload("res://assets/stranded/defense_missile.png")
 
 var inventory: RunInventory
 var active_controls := false
@@ -55,11 +60,20 @@ var preview_cell := Vector2i.ZERO
 var preview_valid := false
 var next_structure_id := 0
 var production_totals := {"ore": 0, "mg": 0, "missiles": 0}
+var defense_weapons: Array = []
+var defense_cities: Array = []
 
 
 func setup(shared_inventory: RunInventory) -> void:
 	inventory = shared_inventory
 	reset_run()
+
+
+func bind_defense_front(shared_weapons: Array, shared_cities: Array) -> void:
+	# These are references to the combat entities, not factory-side copies.
+	defense_weapons = shared_weapons
+	defense_cities = shared_cities
+	queue_redraw()
 
 
 func reset_run() -> void:
@@ -83,6 +97,7 @@ func reset_run() -> void:
 	next_structure_id = 0
 	production_totals = {"ore": 0, "mg": 0, "missiles": 0}
 	_generate_map()
+	_reveal_defense_front()
 	_reveal_around(COMMAND_CELL, GameBalance.FOG_REVEAL_RADIUS)
 	_recalculate_capacities()
 	_update_camera()
@@ -168,42 +183,67 @@ func simulate_factory(delta: float) -> void:
 					if belts.has(output_cell) and not _packet_at(output_cell):
 						structure.timer = 0.0
 						structure.deposit_remaining = int(structure.deposit_remaining) - 1
-						packets.append({"cell": output_cell, "progress": 0.0, "resource": RunInventory.ORE})
+						packets.append({"cell": output_cell, "progress": 0.0, "resource": RunInventory.ORE, "quantity": 1})
 						production_totals.ore = int(production_totals.ore) + 1
 						structure.status = "EXTRACTING"
 						changed = true
 					else:
 						structure.status = "OUTPUT BLOCKED"
 			"ammo_factory":
-				if int(structure.ore_buffer) >= GameBalance.AMMO_FACTORY_ORE_COST and inventory.free_space(RunInventory.GATLING_AMMO) >= GameBalance.AMMO_FACTORY_OUTPUT:
-					structure.timer = float(structure.timer) + delta
-					structure.status = "ASSEMBLING MG AMMO"
-					if float(structure.timer) >= GameBalance.AMMO_FACTORY_INTERVAL:
-						structure.timer = 0.0
-						structure.ore_buffer = int(structure.ore_buffer) - GameBalance.AMMO_FACTORY_ORE_COST
-						inventory.add(RunInventory.GATLING_AMMO, GameBalance.AMMO_FACTORY_OUTPUT)
-						production_totals.mg = int(production_totals.mg) + GameBalance.AMMO_FACTORY_OUTPUT
-						_add_effect(_cell_center(structure.cell), "+%d MG" % GameBalance.AMMO_FACTORY_OUTPUT, Color("#ffd166"))
-						changed = true
-				else:
-					structure.status = "WAITING FOR ORE" if int(structure.ore_buffer) < GameBalance.AMMO_FACTORY_ORE_COST else "AMMO STORAGE FULL"
+				changed = _simulate_ammo_machine(structure, delta, RunInventory.GATLING_AMMO, GameBalance.AMMO_FACTORY_ORE_COST, GameBalance.AMMO_FACTORY_OUTPUT, GameBalance.AMMO_FACTORY_INTERVAL, "ASSEMBLING MG AMMO") or changed
 			"missile_factory":
-				if int(structure.ore_buffer) >= GameBalance.MISSILE_FACTORY_ORE_COST and inventory.free_space(RunInventory.MISSILE_AMMO) >= GameBalance.MISSILE_FACTORY_OUTPUT:
-					structure.timer = float(structure.timer) + delta
-					structure.status = "ASSEMBLING MISSILE"
-					if float(structure.timer) >= GameBalance.MISSILE_FACTORY_INTERVAL:
-						structure.timer = 0.0
-						structure.ore_buffer = int(structure.ore_buffer) - GameBalance.MISSILE_FACTORY_ORE_COST
-						inventory.add(RunInventory.MISSILE_AMMO, GameBalance.MISSILE_FACTORY_OUTPUT)
-						production_totals.missiles = int(production_totals.missiles) + GameBalance.MISSILE_FACTORY_OUTPUT
-						_add_effect(_cell_center(structure.cell), "+1 MISSILE", Color("#79d8ff"))
-						changed = true
-				else:
-					structure.status = "WAITING FOR 2 ORE" if int(structure.ore_buffer) < GameBalance.MISSILE_FACTORY_ORE_COST else "MISSILE STORAGE FULL"
+				changed = _simulate_ammo_machine(structure, delta, RunInventory.MISSILE_AMMO, GameBalance.MISSILE_FACTORY_ORE_COST, GameBalance.MISSILE_FACTORY_OUTPUT, GameBalance.MISSILE_FACTORY_INTERVAL, "ASSEMBLING MISSILE") or changed
+			"storage":
+				changed = _emit_storage_packet(structure) or changed
 	_advance_packets(delta)
 	if changed:
 		state_changed.emit()
 	queue_redraw()
+
+
+func _simulate_ammo_machine(structure: Dictionary, delta: float, ammo_resource: String, ore_cost: int, output_amount: int, interval: float, active_status: String) -> bool:
+	if int(structure.ore_buffer) < ore_cost:
+		structure.status = "WAITING FOR %d ORE" % ore_cost
+		return false
+	structure.timer = minf(interval, float(structure.timer) + delta)
+	structure.status = active_status
+	if float(structure.timer) < interval:
+		return false
+	if not _emit_structure_packet(structure, ammo_resource, output_amount):
+		structure.status = "OUTPUT BLOCKED — CONNECT BELT TO FRONT"
+		return false
+	structure.timer = 0.0
+	structure.ore_buffer = int(structure.ore_buffer) - ore_cost
+	if ammo_resource == RunInventory.GATLING_AMMO:
+		production_totals.mg = int(production_totals.mg) + output_amount
+		_add_effect(_cell_center(structure.cell), "MG CRATE → FRONT", Color("#ffd166"))
+	else:
+		production_totals.missiles = int(production_totals.missiles) + output_amount
+		_add_effect(_cell_center(structure.cell), "MISSILE → FRONT", Color("#79d8ff"))
+	return true
+
+
+func _emit_structure_packet(structure: Dictionary, resource_id: String, quantity: int) -> bool:
+	var output_cell: Vector2i = structure.cell + DIRECTIONS[int(structure.rotation)]
+	if not belts.has(output_cell) or _packet_at(output_cell):
+		return false
+	packets.append({"cell": output_cell, "progress": 0.0, "resource": resource_id, "quantity": quantity})
+	return true
+
+
+func _emit_storage_packet(structure: Dictionary) -> bool:
+	var buffered: Array = structure.get("packet_buffer", [])
+	if buffered.is_empty():
+		structure.status = "STORAGE READY"
+		return false
+	var packet: Dictionary = buffered[0]
+	if not _emit_structure_packet(structure, str(packet.resource), int(packet.quantity)):
+		structure.status = "STORED %d/%d — OUTPUT BLOCKED" % [buffered.size(), GameBalance.STORAGE_PACKET_CAPACITY]
+		return false
+	buffered.pop_front()
+	structure.packet_buffer = buffered
+	structure.status = "DISPATCHING TO FRONT"
+	return true
 
 
 func select_build(kind_id: String) -> void:
@@ -234,6 +274,16 @@ func interact() -> void:
 		else:
 			command_confirm_left = 3.0
 			message_requested.emit("BEGIN NEXT ATTACK?  PRESS E AGAIN")
+		return
+	var front_weapon_index := _nearest_front_weapon_index()
+	if front_weapon_index >= 0:
+		var weapon = defense_weapons[front_weapon_index]
+		if not bool(weapon.unlocked):
+			message_requested.emit("MISSILE NODE OFFLINE — UNLOCK IN COMMAND VIEW")
+			return
+		weapon_selected.emit(front_weapon_index)
+		message_requested.emit("LINKED %s SELECTED — SAME WEAPON IN DEFENSE" % _weapon_display_name(weapon))
+		queue_redraw()
 		return
 	var nearest_index := -1
 	var nearest_distance := 62.0
@@ -414,6 +464,7 @@ func _place_selected_building() -> bool:
 			"deposit_remaining": deposit_remaining,
 			"active": true,
 			"status": "READY",
+			"packet_buffer": [],
 		})
 		next_structure_id += 1
 		if build_kind == "storage": _recalculate_capacities()
@@ -427,7 +478,7 @@ func _place_selected_building() -> bool:
 func _can_build(kind_id: String, cell: Vector2i) -> bool:
 	if transition_locked or not _cell_in_bounds(cell) or not explored_cells.has(cell):
 		return false
-	if mountain_cells.has(cell) or _active_object_at(cell) or cell.distance_to(COMMAND_CELL) < 3.0:
+	if mountain_cells.has(cell) or _active_object_at(cell) or cell.distance_to(COMMAND_CELL) < 3.0 or _front_cell_occupied(cell):
 		return false
 	if belts.has(cell) or _find_structure_at(cell) != null:
 		return false
@@ -466,20 +517,62 @@ func _advance_packets(delta: float) -> void:
 			packets.remove_at(index)
 			continue
 		var next_cell: Vector2i = cell + DIRECTIONS[int(belts[cell])]
+		var front_weapon_index := _front_weapon_index_at(next_cell)
+		if front_weapon_index >= 0:
+			var expected_resource := _ammo_resource_for_weapon(defense_weapons[front_weapon_index])
+			if str(packet.resource) != expected_resource:
+				packet.progress = 0.99
+				continue
+			var quantity := int(packet.get("quantity", 1))
+			var accepted := inventory.add(expected_resource, quantity)
+			if accepted > 0:
+				packet.quantity = quantity - accepted
+				_add_effect(_cell_center(next_cell), "+%d %s" % [accepted, "MG" if expected_resource == RunInventory.GATLING_AMMO else "MISSILE"], Color("#ffd166") if expected_resource == RunInventory.GATLING_AMMO else Color("#79d8ff"))
+				state_changed.emit()
+			if int(packet.quantity) <= 0:
+				packets.remove_at(index)
+			else:
+				packet.progress = 0.99
+			continue
 		if belts.has(next_cell) and not _packet_at(next_cell):
 			packet.cell = next_cell
 			packet.progress = 0.0
 			continue
 		var receiver = _find_structure_at(next_cell)
 		if receiver != null and str(receiver.kind) in ["ammo_factory", "missile_factory", "storage"]:
+			var resource_id := str(packet.resource)
+			var quantity := int(packet.get("quantity", 1))
 			if str(receiver.kind) == "storage":
-				inventory.add(RunInventory.ORE, 1)
+				if resource_id == RunInventory.ORE:
+					inventory.add(RunInventory.ORE, quantity)
+					packets.remove_at(index)
+				elif _store_ammo_packet(receiver, resource_id, quantity):
+					packets.remove_at(index)
+				else:
+					packet.progress = 0.99
+					continue
+			elif resource_id == RunInventory.ORE:
+				receiver.ore_buffer = int(receiver.ore_buffer) + quantity
+				packets.remove_at(index)
 			else:
-				receiver.ore_buffer = int(receiver.ore_buffer) + 1
-			packets.remove_at(index)
+				packet.progress = 0.99
+				continue
 			state_changed.emit()
 		else:
 			packet.progress = 0.99
+
+
+func _store_ammo_packet(storage: Dictionary, resource_id: String, quantity: int) -> bool:
+	if resource_id not in [RunInventory.GATLING_AMMO, RunInventory.MISSILE_AMMO]:
+		return false
+	var buffered: Array = storage.get("packet_buffer", [])
+	if buffered.size() >= GameBalance.STORAGE_PACKET_CAPACITY:
+		storage.status = "STORAGE FULL"
+		return false
+	buffered.append({"resource": resource_id, "quantity": quantity})
+	storage.packet_buffer = buffered
+	storage.status = "STORED %d/%d" % [buffered.size(), GameBalance.STORAGE_PACKET_CAPACITY]
+	return true
 
 
 func _packet_at(cell: Vector2i) -> bool:
@@ -541,6 +634,8 @@ func _position_blocked(world_position: Vector2) -> bool:
 		return true
 	if _find_structure_at(cell) != null:
 		return true
+	if _front_cell_occupied(cell):
+		return true
 	return false
 
 
@@ -573,6 +668,77 @@ func _nearest_exposed_vein() -> Vector2i:
 			best = cell
 			best_distance = distance
 	return best
+
+
+func defense_front_cell_for_weapon(index: int) -> Vector2i:
+	if index < 0 or index >= defense_weapons.size() or not is_instance_valid(defense_weapons[index]):
+		return Vector2i(-999, -999)
+	var normalized_x: float = clampf(float(defense_weapons[index].position.x) / VIEW_SIZE.x, 0.0, 1.0)
+	return Vector2i(clampi(roundi(normalized_x * float(MAP_CELLS.x - 1)), 2, MAP_CELLS.x - 3), DEFENSE_FRONT_ROW)
+
+
+func defense_front_snapshot(index: int) -> Dictionary:
+	if index < 0 or index >= defense_weapons.size() or not is_instance_valid(defense_weapons[index]):
+		return {}
+	var weapon = defense_weapons[index]
+	var ammo_resource := _ammo_resource_for_weapon(weapon)
+	return {
+		"weapon": weapon,
+		"cell": defense_front_cell_for_weapon(index),
+		"unlocked": bool(weapon.unlocked),
+		"selected": bool(weapon.selected),
+		"ammo_resource": ammo_resource,
+		"ammo": inventory.amount(ammo_resource),
+		"capacity": inventory.capacity(ammo_resource),
+	}
+
+
+func _front_weapon_index_at(cell: Vector2i) -> int:
+	for index in defense_weapons.size():
+		if defense_front_cell_for_weapon(index) == cell:
+			return index
+	return -1
+
+
+func _front_city_cell(index: int) -> Vector2i:
+	if index < 0 or index >= defense_cities.size() or not is_instance_valid(defense_cities[index]):
+		return Vector2i(-999, -999)
+	var normalized_x: float = clampf(float(defense_cities[index].position.x) / VIEW_SIZE.x, 0.0, 1.0)
+	return Vector2i(clampi(roundi(normalized_x * float(MAP_CELLS.x - 1)), 1, MAP_CELLS.x - 2), DEFENSE_FRONT_ROW)
+
+
+func _front_cell_occupied(cell: Vector2i) -> bool:
+	if _front_weapon_index_at(cell) >= 0:
+		return true
+	for index in defense_cities.size():
+		if _front_city_cell(index) == cell:
+			return true
+	return false
+
+
+func _nearest_front_weapon_index() -> int:
+	var best_index := -1
+	var best_distance := 68.0
+	for index in defense_weapons.size():
+		var distance := engineer_position.distance_to(_cell_center(defense_front_cell_for_weapon(index)))
+		if distance < best_distance:
+			best_distance = distance
+			best_index = index
+	return best_index
+
+
+func _ammo_resource_for_weapon(weapon) -> String:
+	return RunInventory.MISSILE_AMMO if int(weapon.kind) == PlayerWeapon.Kind.MISSILE else RunInventory.GATLING_AMMO
+
+
+func _weapon_display_name(weapon) -> String:
+	return "MISSILE NODE" if int(weapon.kind) == PlayerWeapon.Kind.MISSILE else "BASIC MG"
+
+
+func _reveal_defense_front() -> void:
+	for x in MAP_CELLS.x:
+		for y in DEFENSE_FRONT_DEPTH:
+			explored_cells[Vector2i(x, y)] = true
 
 
 func _reveal_around(center: Vector2i, radius: int) -> void:
@@ -628,6 +794,10 @@ func context_text() -> String:
 		return "BUILD: %s  |  LMB place  R rotate  RMB cancel" % build_kind.replace("_", " ").to_upper()
 	if engineer_position.distance_to(_cell_center(COMMAND_CELL)) <= 86.0:
 		return "E  COMMAND CENTER — BEGIN NEXT ATTACK"
+	var front_weapon_index := _nearest_front_weapon_index()
+	if front_weapon_index >= 0:
+		var snapshot := defense_front_snapshot(front_weapon_index)
+		return "E  LINKED %s — %d/%d — SELECT SAME COMBAT WEAPON" % [_weapon_display_name(snapshot.weapon), snapshot.ammo, snapshot.capacity]
 	for object in world_objects:
 		if bool(object.active) and engineer_position.distance_to(_cell_center(object.cell)) < 62.0:
 			return "E  %s" % str(object.kind).replace("_", " ").to_upper()
@@ -645,6 +815,7 @@ func _draw() -> void:
 		for y in range(0, MAP_CELLS.y, 2):
 			var tint := Color(0.42, 0.55, 0.39, 0.18 + float((x * 3 + y * 5) % 3) * 0.035)
 			draw_texture_rect_region(TERRAIN_TEXTURE, Rect2(Vector2(x * CELL, y * CELL), Vector2(CELL * 2, CELL * 2)), Rect2(64, 64, 16, 16), tint)
+	_draw_defense_front_ground()
 	for cell in mountain_cells:
 		var kind_id := str(mountain_cells[cell])
 		var color := Color("#4b4744") if kind_id != "hard" else Color("#35383b")
@@ -675,10 +846,15 @@ func _draw() -> void:
 		var packet_cell: Vector2i = packet.cell
 		var direction := Vector2(DIRECTIONS[int(belts.get(packet_cell, 0))])
 		var packet_position := _cell_center(packet_cell) + direction * (float(packet.progress) - 0.5) * CELL
-		draw_circle(packet_position, 5.0, Color("#72d6a0"))
+		var packet_color := Color("#72d6a0")
+		if str(packet.resource) == RunInventory.GATLING_AMMO: packet_color = Color("#ffd166")
+		if str(packet.resource) == RunInventory.MISSILE_AMMO: packet_color = Color("#79d8ff")
+		draw_circle(packet_position, 6.0, packet_color)
+		draw_circle(packet_position, 3.0, Color("#1b2730"))
 	for structure in structures:
 		if not bool(structure.active): continue
 		_draw_structure(structure)
+	_draw_defense_front_entities()
 	var command_center := _cell_center(COMMAND_CELL)
 	draw_texture_rect_region(COMMAND_TEXTURE, Rect2(command_center - Vector2(48, 48), Vector2(96, 96)), Rect2(0, 0, 32, 32))
 	draw_arc(command_center, 53.0, 0.0, TAU, 36, Color("#79d8ff"), 3.0)
@@ -706,14 +882,72 @@ func _draw_structure(structure: Dictionary) -> void:
 			texture = STORAGE_TEXTURE
 			source = Rect2(0, 0, 32, 32)
 	draw_texture_rect_region(texture, Rect2(center - Vector2(32, 32), Vector2(64, 64)), source)
-	if str(structure.kind) == "drill":
+	if str(structure.kind) in ["drill", "ammo_factory", "missile_factory", "storage"]:
 		var output_direction := Vector2(DIRECTIONS[int(structure.rotation)])
 		draw_line(center, center + output_direction * 27.0, Color("#ffd166"), 4.0)
+		draw_circle(center + output_direction * 27.0, 3.5, Color("#fff2b2"))
 	if str(structure.kind) in ["ammo_factory", "missile_factory"]:
 		var interval := GameBalance.AMMO_FACTORY_INTERVAL if str(structure.kind) == "ammo_factory" else GameBalance.MISSILE_FACTORY_INTERVAL
 		var progress := clampf(float(structure.timer) / interval, 0.0, 1.0)
 		draw_rect(Rect2(center + Vector2(-24, 27), Vector2(48, 5)), Color("#17242d"))
 		draw_rect(Rect2(center + Vector2(-24, 27), Vector2(48 * progress, 5)), Color("#72d6a0"))
+	if str(structure.kind) == "storage":
+		var stored_count: int = Array(structure.get("packet_buffer", [])).size()
+		draw_string(ThemeDB.fallback_font, center + Vector2(-28, 35), "%d/%d" % [stored_count, GameBalance.STORAGE_PACKET_CAPACITY], HORIZONTAL_ALIGNMENT_CENTER, 56, 11, Color("#e8f0ff"))
+
+
+func _draw_defense_front_ground() -> void:
+	var front_rect := Rect2(0, 0, MAP_CELLS.x * CELL, DEFENSE_FRONT_DEPTH * CELL)
+	draw_rect(front_rect, Color("#38454a"))
+	for x in MAP_CELLS.x:
+		var cell_rect := Rect2(x * CELL, 0, CELL, DEFENSE_FRONT_DEPTH * CELL)
+		draw_rect(cell_rect, Color(0.18, 0.24, 0.25, 0.18 if x % 2 == 0 else 0.08))
+	draw_line(Vector2(0, DEFENSE_FRONT_DEPTH * CELL), Vector2(MAP_CELLS.x * CELL, DEFENSE_FRONT_DEPTH * CELL), Color("#f0b84b"), 5.0)
+	draw_string(ThemeDB.fallback_font, Vector2(18, 23), "NORTHERN DEFENSE FRONT  •  LIVE WEAPON LOGISTICS", HORIZONTAL_ALIGNMENT_LEFT, 520, 15, Color("#d9f5ff"))
+	for x in range(1, MAP_CELLS.x, 4):
+		draw_texture_rect_region(CRATE_TEXTURE, Rect2(Vector2(x * CELL, (DEFENSE_FRONT_DEPTH - 1) * CELL + 4), Vector2(24, 24)), Rect2(0, 0, 32, 32), Color(0.78, 0.82, 0.82, 0.72))
+
+
+func _draw_defense_front_entities() -> void:
+	for index in defense_cities.size():
+		var city = defense_cities[index]
+		if not is_instance_valid(city):
+			continue
+		var center := _cell_center(_front_city_cell(index))
+		var city_color := Color("#4de3a4")
+		if bool(city.destroyed):
+			city_color = Color("#6a5258")
+		elif float(city.health_ratio()) < 0.4:
+			city_color = Color("#ff5d73")
+		elif float(city.health_ratio()) < 0.75:
+			city_color = Color("#ffb84d")
+		draw_rect(Rect2(center + Vector2(-20, -17), Vector2(40, 30)), Color("#202d38"))
+		for building in [Rect2(center + Vector2(-17, -10), Vector2(9, 20)), Rect2(center + Vector2(-6, -19), Vector2(11, 29)), Rect2(center + Vector2(8, -6), Vector2(8, 16))]:
+			draw_rect(building, city_color)
+		if float(city.shield_health) > 0.0:
+			draw_arc(center, 25.0, PI, TAU, 20, Color("#62e8ff"), 3.0)
+		draw_rect(Rect2(center + Vector2(-21, 17), Vector2(42, 4)), Color("#18242c"))
+		draw_rect(Rect2(center + Vector2(-21, 17), Vector2(42.0 * float(city.health_ratio()), 4)), city_color)
+		draw_string(ThemeDB.fallback_font, center + Vector2(-25, 34), "C%d" % (index + 1), HORIZONTAL_ALIGNMENT_CENTER, 50, 11, Color("#e8f0ff"))
+	for index in defense_weapons.size():
+		var weapon = defense_weapons[index]
+		if not is_instance_valid(weapon):
+			continue
+		var snapshot := defense_front_snapshot(index)
+		var center := _cell_center(snapshot.cell)
+		var is_missile := int(weapon.kind) == PlayerWeapon.Kind.MISSILE
+		var accent := Color("#79d8ff") if is_missile else Color("#ffd166")
+		if not bool(snapshot.unlocked): accent = Color("#697680")
+		draw_circle(center, 31.0, Color("#17242d"))
+		draw_arc(center, 31.0, 0.0, TAU, 28, Color("#ffffff") if bool(snapshot.selected) else accent, 3.0)
+		if is_missile:
+			draw_texture_rect_region(DEFENSE_MISSILE_TEXTURE, Rect2(center - Vector2(18, 24), Vector2(36, 48)), Rect2(48, 40, 32, 40), Color.WHITE if bool(snapshot.unlocked) else Color(0.45, 0.48, 0.5, 0.8))
+		else:
+			draw_texture_rect_region(DEFENSE_GUN_TEXTURE, Rect2(center - Vector2(25, 25), Vector2(50, 50)), Rect2(0, 32, 32, 32))
+		for direction in DIRECTIONS:
+			draw_circle(center + Vector2(direction) * 31.0, 3.5, accent)
+		var status := "OFFLINE" if not bool(snapshot.unlocked) else "%d/%d" % [snapshot.ammo, snapshot.capacity]
+		draw_string(ThemeDB.fallback_font, center + Vector2(-66, 43), "%s  %s" % [_weapon_display_name(weapon), status], HORIZONTAL_ALIGNMENT_CENTER, 132, 11, accent)
 
 
 func _draw_fog() -> void:

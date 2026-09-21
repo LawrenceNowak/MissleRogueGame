@@ -407,9 +407,11 @@ func _build_battlefield() -> void:
 	factory_world.process_mode = Node.PROCESS_MODE_PAUSABLE
 	add_child(factory_world)
 	factory_world.setup(inventory)
+	factory_world.bind_defense_front(weapons, cities)
 	factory_world.wave_requested.connect(_request_defense_transition)
 	factory_world.message_requested.connect(_factory_message)
 	factory_world.credits_found.connect(_on_factory_credits_found)
+	factory_world.weapon_selected.connect(_on_factory_weapon_selected)
 	_select_weapon(0)
 	cities[0].selected = true
 
@@ -1033,6 +1035,12 @@ func _factory_build(kind_id: String) -> void:
 func _on_factory_credits_found(amount: int) -> void:
 	credits += amount
 	_factory_message("SALVAGED +%d CREDITS" % amount)
+
+
+func _on_factory_weapon_selected(index: int) -> void:
+	_select_weapon(index)
+	if is_instance_valid(factory_world):
+		factory_world.queue_redraw()
 
 func _update_factory_hud() -> void:
 	if factory_hud == null or not factory_hud.visible or not is_instance_valid(factory_world):
