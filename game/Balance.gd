@@ -7,22 +7,61 @@ const CITY_REPAIR_AMOUNT := 30.0
 const CITY_REPAIR_COST := 30
 const SHIELD_COST := 60
 const SHIELD_HP := 80.0
-const GATLING_COST := 80
 const WEAPON_UPGRADE_COST := 50
 const CHARM_COST := 40
 const COMPONENT_DROP_CHANCE := 0.08
 const POWERUP_DROP_CHANCE := 0.07
 const RAPID_FIRE_DURATION := 10.0
 
+const STARTING_ORE := 0
+const STARTING_MISSILE_AMMO := 3
+const BASE_MISSILE_CAPACITY := 6
+const STARTING_GATLING_AMMO := 1000
+const BASE_GATLING_CAPACITY := 1500
+const MISSILE_UNLOCK_COST := 60
+
+const ENGINEER_MAX_STAMINA := 100
+const ENGINEER_SPEED := 155.0
+const STAMINA_TREE := 5
+const STAMINA_SMALL_ROCK := 5
+const STAMINA_LARGE_ROCK := 8
+const STAMINA_DIG_NORMAL := 2
+const STAMINA_DIG_HARD := 4
+const STAMINA_GATHER_ORE := 3
+const STAMINA_DRILL := 8
+const STAMINA_MACHINE := 10
+const STAMINA_STORAGE := 6
+const STAMINA_BELT := 1
+const STAMINA_MACHINE_REPAIR := 6
+
+const FACTORY_MAP_CELLS := Vector2i(64, 40)
+const FACTORY_CELL_SIZE := 32
+const FOG_REVEAL_RADIUS := 5
+const DRILL_INTERVAL := 6.0
+const AMMO_FACTORY_INTERVAL := 5.0
+const MISSILE_FACTORY_INTERVAL := 25.0
+const AMMO_FACTORY_ORE_COST := 1
+const AMMO_FACTORY_OUTPUT := 125
+const MISSILE_FACTORY_ORE_COST := 2
+const MISSILE_FACTORY_OUTPUT := 1
+const BELT_STEP_TIME := 0.32
+const BUILD_RECIPES := {
+	"drill": {"wood": 3, "stone": 6, "ore": 0, "stamina": STAMINA_DRILL},
+	"belt": {"wood": 0, "stone": 1, "ore": 0, "stamina": STAMINA_BELT},
+	"ammo_factory": {"wood": 6, "stone": 8, "ore": 2, "stamina": STAMINA_MACHINE},
+	"missile_factory": {"wood": 6, "stone": 10, "ore": 4, "stamina": STAMINA_MACHINE},
+	"storage": {"wood": 8, "stone": 4, "ore": 0, "stamina": STAMINA_STORAGE},
+}
+
 const MISSILE_DAMAGE := 48.0
 const MISSILE_RADIUS := 82.0
 const MISSILE_SPEED := 430.0
 const MISSILE_COOLDOWN := 0.62
 
-const GATLING_DAMAGE := 10.0
-const GATLING_FIRE_RATE := 10.0
-const GATLING_HEAT_PER_SHOT := 8.0
-const GATLING_COOLING := 26.0
+const GATLING_DAMAGE := 9.0
+const GATLING_FIRE_RATE := 12.0
+const GATLING_HEAT_PER_SHOT := 2.5
+const GATLING_COOLING := 22.0
 const GATLING_MAX_HEAT := 100.0
 
 const BOSS_HP := 800.0
