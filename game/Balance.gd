@@ -32,6 +32,7 @@ const STAMINA_DRILL := 8
 const STAMINA_MACHINE := 10
 const STAMINA_STORAGE := 6
 const STAMINA_BELT := 1
+const STAMINA_SPLITTER := 3
 const STAMINA_MACHINE_REPAIR := 6
 
 const FACTORY_MAP_CELLS := Vector2i(64, 40)
@@ -44,11 +45,18 @@ const AMMO_FACTORY_ORE_COST := 1
 const AMMO_FACTORY_OUTPUT := 125
 const MISSILE_FACTORY_ORE_COST := 2
 const MISSILE_FACTORY_OUTPUT := 1
-const BELT_STEP_TIME := 0.32
+const LOGISTICS_FIXED_STEP := 1.0 / 30.0
+const STANDARD_BELT_SPEED := 1.6
+const BELT_MIN_ITEM_SPACING := 0.28
+const BELT_TRANSFER_TOLERANCE := 0.001
+const DRILL_OUTPUT_BUFFER_CAPACITY := 4
+const MACHINE_INPUT_BUFFER_CAPACITY := 6
+const MACHINE_OUTPUT_BUFFER_CAPACITY := 4
 const STORAGE_PACKET_CAPACITY := 8
 const BUILD_RECIPES := {
 	"drill": {"wood": 3, "stone": 6, "ore": 0, "stamina": STAMINA_DRILL},
 	"belt": {"wood": 0, "stone": 1, "ore": 0, "stamina": STAMINA_BELT},
+	"splitter": {"wood": 2, "stone": 4, "ore": 0, "stamina": STAMINA_SPLITTER},
 	"ammo_factory": {"wood": 6, "stone": 8, "ore": 2, "stamina": STAMINA_MACHINE},
 	"missile_factory": {"wood": 6, "stone": 10, "ore": 4, "stamina": STAMINA_MACHINE},
 	"storage": {"wood": 8, "stone": 4, "ore": 0, "stamina": STAMINA_STORAGE},

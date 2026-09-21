@@ -41,6 +41,8 @@ var engineer_position := _cell_center(COMMAND_CELL + Vector2i(-2, 1))
 var facing := Vector2.DOWN
 var walk_time := 0.0
 var belt_animation := 0.0
+var logistics_accumulator := 0.0
+var logistics_debug_visible := false
 var command_confirm_left := 0.0
 var exhaustion_emitted := false
 
@@ -50,8 +52,10 @@ var exposed_veins: Dictionary = {}
 var vein_amounts: Dictionary = {}
 var world_objects: Array[Dictionary] = []
 var structures: Array[Dictionary] = []
-var belts: Dictionary = {}
-var packets: Array[Dictionary] = []
+var logistics := LogisticsNetwork.new()
+var belts: Dictionary = logistics.belts
+var splitters: Dictionary = logistics.splitters
+var belt_visuals := BeltVisualSet.new()
 var effects: Array[Dictionary] = []
 
 var build_kind := ""
@@ -66,6 +70,7 @@ var defense_cities: Array = []
 
 func setup(shared_inventory: RunInventory) -> void:
 	inventory = shared_inventory
+	belt_visuals.fallback = BELT_TEXTURE
 	reset_run()
 
 
@@ -91,8 +96,10 @@ func reset_run() -> void:
 	vein_amounts.clear()
 	world_objects.clear()
 	structures.clear()
-	belts.clear()
-	packets.clear()
+	logistics.reset()
+	belts = logistics.belts
+	splitters = logistics.splitters
+	logistics_accumulator = 0.0
 	effects.clear()
 	next_structure_id = 0
 	production_totals = {"ore": 0, "mg": 0, "missiles": 0}
@@ -113,6 +120,8 @@ func begin_preparation() -> void:
 	engineer_position = _cell_center(COMMAND_CELL + Vector2i(-2, 1))
 	build_kind = ""
 	command_confirm_left = 0.0
+	for structure in structures:
+		if bool(structure.active): structure.status = "PAUSED"
 	active_controls = visible
 	_reveal_around(_world_to_cell(engineer_position), GameBalance.FOG_REVEAL_RADIUS)
 	state_changed.emit()
@@ -171,79 +180,156 @@ func simulate_factory(delta: float) -> void:
 	if not simulation_active:
 		return
 	belt_animation = fmod(belt_animation + delta * 8.0, 16.0)
+	logistics_accumulator += maxf(0.0, delta)
+	while logistics_accumulator >= GameBalance.LOGISTICS_FIXED_STEP:
+		_simulate_factory_step(GameBalance.LOGISTICS_FIXED_STEP)
+		logistics_accumulator -= GameBalance.LOGISTICS_FIXED_STEP
+	queue_redraw()
+
+
+func _simulate_factory_step(delta: float) -> void:
 	var changed := false
+	for structure in structures:
+		if bool(structure.active):
+			changed = _emit_buffered_output(structure) or changed
 	for structure in structures:
 		if not bool(structure.active):
 			continue
 		match str(structure.kind):
 			"drill":
-				structure.timer = float(structure.timer) + delta
-				if float(structure.timer) >= GameBalance.DRILL_INTERVAL and int(structure.deposit_remaining) > 0:
-					var output_cell: Vector2i = structure.cell + DIRECTIONS[int(structure.rotation)]
-					if belts.has(output_cell) and not _packet_at(output_cell):
-						structure.timer = 0.0
-						structure.deposit_remaining = int(structure.deposit_remaining) - 1
-						packets.append({"cell": output_cell, "progress": 0.0, "resource": RunInventory.ORE, "quantity": 1})
-						production_totals.ore = int(production_totals.ore) + 1
-						structure.status = "EXTRACTING"
-						changed = true
-					else:
-						structure.status = "OUTPUT BLOCKED"
+				changed = _simulate_drill(structure, delta) or changed
 			"ammo_factory":
-				changed = _simulate_ammo_machine(structure, delta, RunInventory.GATLING_AMMO, GameBalance.AMMO_FACTORY_ORE_COST, GameBalance.AMMO_FACTORY_OUTPUT, GameBalance.AMMO_FACTORY_INTERVAL, "ASSEMBLING MG AMMO") or changed
+				changed = _simulate_ammo_machine(structure, delta, RunInventory.GATLING_AMMO, GameBalance.AMMO_FACTORY_ORE_COST, GameBalance.AMMO_FACTORY_OUTPUT, "RUNNING — MG AMMO") or changed
 			"missile_factory":
-				changed = _simulate_ammo_machine(structure, delta, RunInventory.MISSILE_AMMO, GameBalance.MISSILE_FACTORY_ORE_COST, GameBalance.MISSILE_FACTORY_OUTPUT, GameBalance.MISSILE_FACTORY_INTERVAL, "ASSEMBLING MISSILE") or changed
+				changed = _simulate_ammo_machine(structure, delta, RunInventory.MISSILE_AMMO, GameBalance.MISSILE_FACTORY_ORE_COST, GameBalance.MISSILE_FACTORY_OUTPUT, "RUNNING — MISSILE") or changed
 			"storage":
-				changed = _emit_storage_packet(structure) or changed
-	_advance_packets(delta)
+				var stored: Array = structure.get("storage_inventory", [])
+				structure.status = "STORAGE %d/%d" % [stored.size(), _effective_output_capacity(structure, GameBalance.STORAGE_PACKET_CAPACITY)]
+	logistics.step(delta, _accept_transport_item)
 	if changed:
 		state_changed.emit()
-	queue_redraw()
 
 
-func _simulate_ammo_machine(structure: Dictionary, delta: float, ammo_resource: String, ore_cost: int, output_amount: int, interval: float, active_status: String) -> bool:
-	if int(structure.ore_buffer) < ore_cost:
-		structure.status = "WAITING FOR %d ORE" % ore_cost
+func _simulate_drill(structure: Dictionary, delta: float) -> bool:
+	var output_buffer: Array = structure.output_buffer
+	var capacity := _effective_output_capacity(structure, GameBalance.DRILL_OUTPUT_BUFFER_CAPACITY)
+	if int(structure.deposit_remaining) <= 0:
+		structure.status = "DEPOSIT EMPTY"
 		return false
-	structure.timer = minf(interval, float(structure.timer) + delta)
-	structure.status = active_status
-	if float(structure.timer) < interval:
+	if output_buffer.size() >= capacity:
+		structure.status = "OUTPUT FULL"
 		return false
-	if not _emit_structure_packet(structure, ammo_resource, output_amount):
-		structure.status = "OUTPUT BLOCKED — CONNECT BELT TO FRONT"
+	var production_time := _effective_production_time(structure)
+	structure.timer = minf(production_time, float(structure.timer) + delta)
+	structure.status = "RUNNING — EXTRACTING"
+	if float(structure.timer) < production_time:
 		return false
 	structure.timer = 0.0
-	structure.ore_buffer = int(structure.ore_buffer) - ore_cost
+	structure.deposit_remaining = int(structure.deposit_remaining) - 1
+	output_buffer.append({"resource": RunInventory.ORE, "quantity": 1})
+	production_totals.ore = int(production_totals.ore) + 1
+	return true
+
+
+func _simulate_ammo_machine(structure: Dictionary, delta: float, ammo_resource: String, base_ore_cost: int, base_output_amount: int, active_status: String) -> bool:
+	var input_buffer: Dictionary = structure.input_buffer
+	var ore_cost := maxi(1, ceili(float(base_ore_cost) * float(structure.modifiers.input_consumption)))
+	var ore_available := int(input_buffer.get(RunInventory.ORE, 0))
+	structure.ore_buffer = ore_available
+	if ore_available < ore_cost:
+		structure.status = "NO INPUT — NEED %d ORE" % ore_cost
+		return false
+	var output_buffer: Array = structure.output_buffer
+	if output_buffer.size() >= _effective_output_capacity(structure, GameBalance.MACHINE_OUTPUT_BUFFER_CAPACITY):
+		structure.status = "OUTPUT FULL"
+		return false
+	var production_time := _effective_production_time(structure)
+	structure.timer = minf(production_time, float(structure.timer) + delta)
+	structure.status = active_status
+	if float(structure.timer) < production_time:
+		return false
+	structure.timer = 0.0
+	input_buffer[RunInventory.ORE] = ore_available - ore_cost
+	structure.ore_buffer = int(input_buffer[RunInventory.ORE])
+	var output_amount := maxi(1, roundi(float(base_output_amount) * float(structure.modifiers.output_quantity)))
+	output_buffer.append({"resource": ammo_resource, "quantity": output_amount})
 	if ammo_resource == RunInventory.GATLING_AMMO:
 		production_totals.mg = int(production_totals.mg) + output_amount
-		_add_effect(_cell_center(structure.cell), "MG CRATE → FRONT", Color("#ffd166"))
+		_add_effect(_cell_center(structure.cell), "MG CRATE READY", Color("#ffd166"))
 	else:
 		production_totals.missiles = int(production_totals.missiles) + output_amount
-		_add_effect(_cell_center(structure.cell), "MISSILE → FRONT", Color("#79d8ff"))
+		_add_effect(_cell_center(structure.cell), "MISSILE READY", Color("#79d8ff"))
 	return true
 
 
-func _emit_structure_packet(structure: Dictionary, resource_id: String, quantity: int) -> bool:
-	var output_cell: Vector2i = structure.cell + DIRECTIONS[int(structure.rotation)]
-	if not belts.has(output_cell) or _packet_at(output_cell):
-		return false
-	packets.append({"cell": output_cell, "progress": 0.0, "resource": resource_id, "quantity": quantity})
-	return true
-
-
-func _emit_storage_packet(structure: Dictionary) -> bool:
-	var buffered: Array = structure.get("packet_buffer", [])
+func _emit_buffered_output(structure: Dictionary) -> bool:
+	var buffered: Array = structure.storage_inventory if str(structure.kind) == "storage" else structure.output_buffer
 	if buffered.is_empty():
-		structure.status = "STORAGE READY"
 		return false
-	var packet: Dictionary = buffered[0]
-	if not _emit_structure_packet(structure, str(packet.resource), int(packet.quantity)):
-		structure.status = "STORED %d/%d — OUTPUT BLOCKED" % [buffered.size(), GameBalance.STORAGE_PACKET_CAPACITY]
+	var item: Dictionary = buffered[0]
+	var output_cell: Vector2i = structure.cell + DIRECTIONS[int(structure.rotation)]
+	var used_lane := logistics.try_insert_from_endpoint(output_cell, str(item.resource), int(item.quantity), int(structure.rotation), str(structure.output_lane_mode), int(structure.next_output_lane))
+	if used_lane < 0:
+		structure.status = "OUTPUT BLOCKED"
 		return false
 	buffered.pop_front()
-	structure.packet_buffer = buffered
-	structure.status = "DISPATCHING TO FRONT"
+	if str(structure.output_lane_mode) == "AUTO":
+		structure.next_output_lane = 1 - used_lane
+	structure.status = "DISPATCHING LANE %d" % used_lane
 	return true
+
+
+func _accept_transport_item(cell: Vector2i, item: Dictionary, source_direction: int, _source_lane: int) -> bool:
+	var front_weapon_index := _front_weapon_index_at(cell)
+	if front_weapon_index >= 0:
+		var expected_resource := _ammo_resource_for_weapon(defense_weapons[front_weapon_index])
+		var quantity := int(item.quantity)
+		if str(item.resource) != expected_resource or inventory.free_space(expected_resource) < quantity:
+			return false
+		inventory.add(expected_resource, quantity)
+		_add_effect(_cell_center(cell), "+%d %s" % [quantity, "MG" if expected_resource == RunInventory.GATLING_AMMO else "MISSILE"], TransportResources.definition(expected_resource).visual_color)
+		state_changed.emit()
+		return true
+	var receiver = _find_structure_at(cell)
+	if receiver == null:
+		return false
+	if source_direction == (int(receiver.rotation) + 2) % 4:
+		return false # The configured output side is never also an input port.
+	var resource_id := str(item.resource)
+	var quantity := int(item.quantity)
+	if str(receiver.kind) in ["ammo_factory", "missile_factory"]:
+		if resource_id != RunInventory.ORE:
+			return false
+		var input_buffer: Dictionary = receiver.input_buffer
+		var input_capacity := _effective_input_capacity(receiver, GameBalance.MACHINE_INPUT_BUFFER_CAPACITY)
+		if int(input_buffer.get(resource_id, 0)) + quantity > input_capacity:
+			receiver.status = "OUTPUT FULL" if Array(receiver.output_buffer).size() >= _effective_output_capacity(receiver, GameBalance.MACHINE_OUTPUT_BUFFER_CAPACITY) else "INPUT FULL"
+			return false
+		input_buffer[resource_id] = int(input_buffer.get(resource_id, 0)) + quantity
+		receiver.ore_buffer = int(input_buffer[resource_id])
+		state_changed.emit()
+		return true
+	if str(receiver.kind) == "storage":
+		var stored: Array = receiver.storage_inventory
+		if stored.size() >= _effective_output_capacity(receiver, GameBalance.STORAGE_PACKET_CAPACITY):
+			receiver.status = "INPUT FULL"
+			return false
+		stored.append({"resource": resource_id, "quantity": quantity})
+		state_changed.emit()
+		return true
+	return false
+
+
+func _effective_production_time(structure: Dictionary) -> float:
+	return maxf(0.05, float(structure.base_production_time) / maxf(0.05, float(structure.modifiers.speed)))
+
+
+func _effective_input_capacity(structure: Dictionary, base_capacity: int) -> int:
+	return maxi(1, roundi(float(base_capacity) * float(structure.modifiers.input_buffer)))
+
+
+func _effective_output_capacity(structure: Dictionary, base_capacity: int) -> int:
+	return maxi(1, roundi(float(base_capacity) * float(structure.modifiers.output_buffer)))
 
 
 func select_build(kind_id: String) -> void:
@@ -285,6 +371,10 @@ func interact() -> void:
 		message_requested.emit("LINKED %s SELECTED — SAME WEAPON IN DEFENSE" % _weapon_display_name(weapon))
 		queue_redraw()
 		return
+	var splitter_cell := _nearest_splitter_cell()
+	if splitters.has(splitter_cell):
+		_cycle_splitter_configuration(splitter_cell)
+		return
 	var nearest_index := -1
 	var nearest_distance := 62.0
 	for index in world_objects.size():
@@ -322,6 +412,19 @@ func _unhandled_input(event: InputEvent) -> void:
 					build_rotation = (build_rotation + 1) % 4
 					message_requested.emit("ROTATION %s" % ["EAST", "SOUTH", "WEST", "NORTH"][build_rotation])
 					get_viewport().set_input_as_handled()
+				else:
+					var rotate_cell := _world_to_cell(to_local(get_viewport().get_mouse_position()))
+					if belts.has(rotate_cell):
+						if logistics.rotate_belt(rotate_cell, int(belts[rotate_cell].direction) + 1):
+							message_requested.emit("BELT ROTATED")
+						else:
+							message_requested.emit("BELT OCCUPIED — ROTATION BLOCKED")
+						get_viewport().set_input_as_handled()
+			KEY_V:
+				logistics_debug_visible = not logistics_debug_visible
+				message_requested.emit("LOGISTICS DEBUG %s" % ("ON" if logistics_debug_visible else "OFF"))
+				queue_redraw()
+				get_viewport().set_input_as_handled()
 	if event is InputEventMouseButton and event.pressed:
 		if event.button_index == MOUSE_BUTTON_LEFT and not build_kind.is_empty():
 			preview_cell = _world_to_cell(to_local(event.position))
@@ -451,9 +554,14 @@ func _place_selected_building() -> bool:
 	_consume_recipe(recipe)
 	_spend_stamina(stamina_cost, "CONSTRUCTION")
 	if build_kind == "belt":
-		belts[preview_cell] = build_rotation
+		logistics.add_belt(preview_cell, build_rotation)
+	elif build_kind == "splitter":
+		logistics.add_splitter(preview_cell, build_rotation)
 	else:
 		var deposit_remaining := int(vein_amounts.get(preview_cell, 0)) if build_kind == "drill" else 0
+		var base_production_time := GameBalance.DRILL_INTERVAL
+		if build_kind == "ammo_factory": base_production_time = GameBalance.AMMO_FACTORY_INTERVAL
+		if build_kind == "missile_factory": base_production_time = GameBalance.MISSILE_FACTORY_INTERVAL
 		structures.append({
 			"id": next_structure_id,
 			"kind": build_kind,
@@ -464,7 +572,19 @@ func _place_selected_building() -> bool:
 			"deposit_remaining": deposit_remaining,
 			"active": true,
 			"status": "READY",
-			"packet_buffer": [],
+			"input_buffer": {},
+			"output_buffer": [],
+			"storage_inventory": [],
+			"base_production_time": base_production_time,
+			"output_lane_mode": "AUTO",
+			"next_output_lane": 0,
+			"modifiers": {
+				"speed": 1.0,
+				"input_consumption": 1.0,
+				"output_quantity": 1.0,
+				"input_buffer": 1.0,
+				"output_buffer": 1.0,
+			},
 		})
 		next_structure_id += 1
 		if build_kind == "storage": _recalculate_capacities()
@@ -480,11 +600,11 @@ func _can_build(kind_id: String, cell: Vector2i) -> bool:
 		return false
 	if mountain_cells.has(cell) or _active_object_at(cell) or cell.distance_to(COMMAND_CELL) < 3.0 or _front_cell_occupied(cell):
 		return false
-	if belts.has(cell) or _find_structure_at(cell) != null:
+	if logistics.cell_occupied(cell) or _find_structure_at(cell) != null:
 		return false
 	if kind_id == "drill":
 		return exposed_veins.has(cell) and int(vein_amounts.get(cell, 0)) > 0
-	if kind_id != "belt" and exposed_veins.has(cell):
+	if kind_id not in ["belt", "splitter"] and exposed_veins.has(cell):
 		return false
 	return true
 
@@ -500,86 +620,20 @@ func _consume_recipe(recipe: Dictionary) -> void:
 
 
 func _remove_belt_at(cell: Vector2i) -> void:
-	if belts.erase(cell):
+	if belts.has(cell):
+		if not logistics.remove_belt(cell):
+			message_requested.emit("BELT OCCUPIED — REMOVE ITEMS FIRST")
+			return
 		message_requested.emit("BELT REMOVED")
 		state_changed.emit()
 		queue_redraw()
-
-
-func _advance_packets(delta: float) -> void:
-	for index in range(packets.size() - 1, -1, -1):
-		var packet: Dictionary = packets[index]
-		packet.progress = float(packet.progress) + delta / GameBalance.BELT_STEP_TIME
-		if float(packet.progress) < 1.0:
-			continue
-		var cell: Vector2i = packet.cell
-		if not belts.has(cell):
-			packets.remove_at(index)
-			continue
-		var next_cell: Vector2i = cell + DIRECTIONS[int(belts[cell])]
-		var front_weapon_index := _front_weapon_index_at(next_cell)
-		if front_weapon_index >= 0:
-			var expected_resource := _ammo_resource_for_weapon(defense_weapons[front_weapon_index])
-			if str(packet.resource) != expected_resource:
-				packet.progress = 0.99
-				continue
-			var quantity := int(packet.get("quantity", 1))
-			var accepted := inventory.add(expected_resource, quantity)
-			if accepted > 0:
-				packet.quantity = quantity - accepted
-				_add_effect(_cell_center(next_cell), "+%d %s" % [accepted, "MG" if expected_resource == RunInventory.GATLING_AMMO else "MISSILE"], Color("#ffd166") if expected_resource == RunInventory.GATLING_AMMO else Color("#79d8ff"))
-				state_changed.emit()
-			if int(packet.quantity) <= 0:
-				packets.remove_at(index)
-			else:
-				packet.progress = 0.99
-			continue
-		if belts.has(next_cell) and not _packet_at(next_cell):
-			packet.cell = next_cell
-			packet.progress = 0.0
-			continue
-		var receiver = _find_structure_at(next_cell)
-		if receiver != null and str(receiver.kind) in ["ammo_factory", "missile_factory", "storage"]:
-			var resource_id := str(packet.resource)
-			var quantity := int(packet.get("quantity", 1))
-			if str(receiver.kind) == "storage":
-				if resource_id == RunInventory.ORE:
-					inventory.add(RunInventory.ORE, quantity)
-					packets.remove_at(index)
-				elif _store_ammo_packet(receiver, resource_id, quantity):
-					packets.remove_at(index)
-				else:
-					packet.progress = 0.99
-					continue
-			elif resource_id == RunInventory.ORE:
-				receiver.ore_buffer = int(receiver.ore_buffer) + quantity
-				packets.remove_at(index)
-			else:
-				packet.progress = 0.99
-				continue
-			state_changed.emit()
-		else:
-			packet.progress = 0.99
-
-
-func _store_ammo_packet(storage: Dictionary, resource_id: String, quantity: int) -> bool:
-	if resource_id not in [RunInventory.GATLING_AMMO, RunInventory.MISSILE_AMMO]:
-		return false
-	var buffered: Array = storage.get("packet_buffer", [])
-	if buffered.size() >= GameBalance.STORAGE_PACKET_CAPACITY:
-		storage.status = "STORAGE FULL"
-		return false
-	buffered.append({"resource": resource_id, "quantity": quantity})
-	storage.packet_buffer = buffered
-	storage.status = "STORED %d/%d" % [buffered.size(), GameBalance.STORAGE_PACKET_CAPACITY]
-	return true
-
-
-func _packet_at(cell: Vector2i) -> bool:
-	for packet in packets:
-		if packet.cell == cell:
-			return true
-	return false
+	elif splitters.has(cell):
+		if not logistics.remove_splitter(cell):
+			message_requested.emit("SPLITTER OCCUPIED — REMOVE ITEMS FIRST")
+			return
+		message_requested.emit("SPLITTER REMOVED")
+		state_changed.emit()
+		queue_redraw()
 
 
 func _find_structure_at(cell: Vector2i):
@@ -590,11 +644,10 @@ func _find_structure_at(cell: Vector2i):
 
 
 func _recalculate_capacities() -> void:
-	var storage_count := 0
-	for structure in structures:
-		if bool(structure.active) and str(structure.kind) == "storage": storage_count += 1
-	inventory.set_capacity(RunInventory.GATLING_AMMO, GameBalance.BASE_GATLING_CAPACITY + storage_count * 500)
-	inventory.set_capacity(RunInventory.MISSILE_AMMO, GameBalance.BASE_MISSILE_CAPACITY + storage_count * 4)
+	# Weapon depots own the authoritative ammo capacities. Factory Storage is a
+	# real finite transport inventory rather than an abstract capacity upgrade.
+	inventory.set_capacity(RunInventory.GATLING_AMMO, GameBalance.BASE_GATLING_CAPACITY)
+	inventory.set_capacity(RunInventory.MISSILE_AMMO, GameBalance.BASE_MISSILE_CAPACITY)
 
 
 func _spend_stamina(amount: int, action: String) -> bool:
@@ -634,6 +687,8 @@ func _position_blocked(world_position: Vector2) -> bool:
 		return true
 	if _find_structure_at(cell) != null:
 		return true
+	if splitters.has(cell):
+		return true
 	if _front_cell_occupied(cell):
 		return true
 	return false
@@ -668,6 +723,57 @@ func _nearest_exposed_vein() -> Vector2i:
 			best = cell
 			best_distance = distance
 	return best
+
+
+func _nearest_splitter_cell() -> Vector2i:
+	var best := Vector2i(-999, -999)
+	var best_distance := 62.0
+	for cell in splitters:
+		var distance := engineer_position.distance_to(_cell_center(cell))
+		if distance < best_distance:
+			best = cell
+			best_distance = distance
+	return best
+
+
+func _nearest_structure():
+	var best = null
+	var best_distance := 62.0
+	for structure in structures:
+		if not bool(structure.active):
+			continue
+		var distance := engineer_position.distance_to(_cell_center(structure.cell))
+		if distance < best_distance:
+			best = structure
+			best_distance = distance
+	return best
+
+
+func _cycle_splitter_configuration(cell: Vector2i) -> void:
+	var splitter: Dictionary = splitters[cell]
+	splitter.config_index = (int(splitter.config_index) + 1) % 5
+	match int(splitter.config_index):
+		0:
+			logistics.configure_splitter(cell)
+		1:
+			logistics.configure_splitter(cell, LogisticsNetwork.OUTPUT_A_PRIORITY)
+		2:
+			logistics.configure_splitter(cell, LogisticsNetwork.OUTPUT_B_PRIORITY)
+		3:
+			logistics.configure_splitter(cell, LogisticsNetwork.OUTPUT_NONE, RunInventory.ORE, LogisticsNetwork.FILTER_STRICT)
+		4:
+			logistics.configure_splitter(cell, LogisticsNetwork.OUTPUT_NONE, RunInventory.ORE, LogisticsNetwork.FILTER_OVERFLOW)
+	message_requested.emit("SPLITTER: %s" % _splitter_configuration_text(splitter))
+	queue_redraw()
+
+
+func _splitter_configuration_text(splitter: Dictionary) -> String:
+	match int(splitter.get("config_index", 0)):
+		1: return "OUTPUT A PRIORITY"
+		2: return "OUTPUT B PRIORITY"
+		3: return "ORE FILTER — STRICT"
+		4: return "ORE FILTER — OVERFLOW"
+		_: return "BALANCE"
 
 
 func defense_front_cell_for_weapon(index: int) -> Vector2i:
@@ -798,6 +904,12 @@ func context_text() -> String:
 	if front_weapon_index >= 0:
 		var snapshot := defense_front_snapshot(front_weapon_index)
 		return "E  LINKED %s — %d/%d — SELECT SAME COMBAT WEAPON" % [_weapon_display_name(snapshot.weapon), snapshot.ammo, snapshot.capacity]
+	var splitter_cell := _nearest_splitter_cell()
+	if splitters.has(splitter_cell):
+		return "E  SPLITTER — %s  •  V DEBUG LANES" % _splitter_configuration_text(splitters[splitter_cell])
+	var nearby_structure = _nearest_structure()
+	if nearby_structure != null:
+		return "%s — %s  •  V DEBUG PORTS" % [str(nearby_structure.kind).replace("_", " ").to_upper(), str(nearby_structure.status)]
 	for object in world_objects:
 		if bool(object.active) and engineer_position.distance_to(_cell_center(object.cell)) < 62.0:
 			return "E  %s" % str(object.kind).replace("_", " ").to_upper()
@@ -805,7 +917,7 @@ func context_text() -> String:
 		return "E  DIG MOUNTAIN"
 	if exposed_veins.has(_nearest_exposed_vein()):
 		return "E  GATHER ORE"
-	return "WASD move  •  E interact  •  TAB command view"
+	return "WASD move  •  E interact  •  V logistics debug  •  TAB command view"
 
 
 func _draw() -> void:
@@ -836,21 +948,7 @@ func _draw() -> void:
 			"large_rock": draw_texture_rect(BIG_ROCK_TEXTURE, Rect2(center - Vector2(48, 23), Vector2(96, 46)), false)
 			"surface_ore": draw_texture_rect_region(ORE_TEXTURE, Rect2(center - Vector2(16, 16), Vector2(32, 32)), Rect2(0, 0, 16, 16))
 			"crate": draw_texture_rect_region(CRATE_TEXTURE, Rect2(center - Vector2(20, 20), Vector2(40, 40)), Rect2(0, 0, 32, 32))
-	for cell in belts:
-		var rect := Rect2(Vector2(cell.x * CELL, cell.y * CELL), Vector2(CELL, CELL))
-		var frame := int(belt_animation) % 16
-		draw_texture_rect_region(BELT_TEXTURE, rect, Rect2(frame * 16, 0, 16, 16))
-		var direction: Vector2i = DIRECTIONS[int(belts[cell])]
-		draw_line(_cell_center(cell) - Vector2(direction) * 7.0, _cell_center(cell) + Vector2(direction) * 7.0, Color("#ffe66d"), 2.0)
-	for packet in packets:
-		var packet_cell: Vector2i = packet.cell
-		var direction := Vector2(DIRECTIONS[int(belts.get(packet_cell, 0))])
-		var packet_position := _cell_center(packet_cell) + direction * (float(packet.progress) - 0.5) * CELL
-		var packet_color := Color("#72d6a0")
-		if str(packet.resource) == RunInventory.GATLING_AMMO: packet_color = Color("#ffd166")
-		if str(packet.resource) == RunInventory.MISSILE_AMMO: packet_color = Color("#79d8ff")
-		draw_circle(packet_position, 6.0, packet_color)
-		draw_circle(packet_position, 3.0, Color("#1b2730"))
+	_draw_belt_network()
 	for structure in structures:
 		if not bool(structure.active): continue
 		_draw_structure(structure)
@@ -887,13 +985,95 @@ func _draw_structure(structure: Dictionary) -> void:
 		draw_line(center, center + output_direction * 27.0, Color("#ffd166"), 4.0)
 		draw_circle(center + output_direction * 27.0, 3.5, Color("#fff2b2"))
 	if str(structure.kind) in ["ammo_factory", "missile_factory"]:
-		var interval := GameBalance.AMMO_FACTORY_INTERVAL if str(structure.kind) == "ammo_factory" else GameBalance.MISSILE_FACTORY_INTERVAL
+		var interval := _effective_production_time(structure)
 		var progress := clampf(float(structure.timer) / interval, 0.0, 1.0)
 		draw_rect(Rect2(center + Vector2(-24, 27), Vector2(48, 5)), Color("#17242d"))
 		draw_rect(Rect2(center + Vector2(-24, 27), Vector2(48 * progress, 5)), Color("#72d6a0"))
 	if str(structure.kind) == "storage":
-		var stored_count: int = Array(structure.get("packet_buffer", [])).size()
+		var stored_count: int = Array(structure.get("storage_inventory", [])).size()
 		draw_string(ThemeDB.fallback_font, center + Vector2(-28, 35), "%d/%d" % [stored_count, GameBalance.STORAGE_PACKET_CAPACITY], HORIZONTAL_ALIGNMENT_CENTER, 56, 11, Color("#e8f0ff"))
+	if logistics_debug_visible:
+		for port_direction in 4:
+			var port_color := Color("#ffd166") if port_direction == int(structure.rotation) else Color("#72d6a0")
+			draw_circle(center + Vector2(DIRECTIONS[port_direction]) * 25.0, 4.0, port_color)
+		var input_count := 0
+		for amount in Dictionary(structure.input_buffer).values(): input_count += int(amount)
+		var output_count := Array(structure.output_buffer).size() if str(structure.kind) != "storage" else Array(structure.storage_inventory).size()
+		draw_string(ThemeDB.fallback_font, center + Vector2(-60, -42), "%s  IN:%d OUT:%d" % [str(structure.status), input_count, output_count], HORIZONTAL_ALIGNMENT_CENTER, 120, 10, Color("#ffffff"))
+
+
+func _draw_belt_network() -> void:
+	for cell in belts:
+		var rect := Rect2(Vector2(cell.x * CELL, cell.y * CELL), Vector2(CELL, CELL))
+		draw_rect(rect, Color("#1d2b31"))
+		draw_rect(rect.grow(-1.0), Color("#657078"), false, 1.5)
+		var topology := logistics.topology_for(cell)
+		var texture := belt_visuals.texture_for(topology)
+		if texture != null:
+			if texture == BELT_TEXTURE:
+				var frame := int(belt_animation) % 16
+				draw_texture_rect_region(texture, rect, Rect2(frame * 16, 0, 16, 16), Color(1, 1, 1, 0.34))
+			else:
+				draw_texture_rect(texture, rect, false)
+		for lane in 2:
+			var points := logistics.lane_path_points(cell, lane, float(CELL), 8)
+			var lane_color := Color("#63d4ff") if lane == 0 else Color("#ff9bc9")
+			draw_polyline(points, Color(lane_color, 0.95 if logistics_debug_visible else 0.48), 2.0 if logistics_debug_visible else 1.2, true)
+			if logistics_debug_visible and logistics.leading_item_blocked(cell, lane):
+				draw_circle(points[points.size() - 1], 4.0, Color("#ff4f64"))
+		if logistics_debug_visible:
+			for incoming_direction in Array(belts[cell].incoming):
+				if int(incoming_direction) == int(belts[cell].primary_input):
+					continue
+				var destination_lane := logistics.side_load_destination_lane(int(incoming_direction), int(belts[cell].direction))
+				var source_edge := _cell_center(cell) - Vector2(DIRECTIONS[int(incoming_direction)]) * CELL * 0.48
+				var lane_points := logistics.lane_path_points(cell, destination_lane, float(CELL), 8)
+				draw_line(source_edge, lane_points[2], Color("#ffdf70"), 2.0)
+				draw_string(ThemeDB.fallback_font, source_edge + Vector2(-8, -4), "L%d" % destination_lane, HORIZONTAL_ALIGNMENT_CENTER, 16, 8, Color("#ffdf70"))
+		var direction := Vector2(DIRECTIONS[int(belts[cell].direction)])
+		draw_line(_cell_center(cell) - direction * 4.0, _cell_center(cell) + direction * 7.0, Color("#fff2b2"), 2.0)
+	for cell in splitters:
+		_draw_splitter(cell, splitters[cell])
+	for item in logistics.all_items():
+		if belts.has(item.cell):
+			_draw_transport_item(item)
+
+
+func _draw_transport_item(item: Dictionary) -> void:
+	var position_value := logistics.item_world_position(item, float(CELL))
+	var definition := TransportResources.definition(str(item.resource))
+	var texture: Texture2D = definition.texture
+	var scale_value: Vector2 = definition.visual_scale
+	var offset: Vector2 = definition.visual_offset
+	if texture != null:
+		var size := Vector2(12, 12) * scale_value
+		draw_texture_rect(texture, Rect2(position_value + offset - size * 0.5, size), false)
+	else:
+		var color: Color = definition.visual_color
+		draw_circle(position_value, 5.5, color)
+		draw_circle(position_value, 2.5, Color("#152028"))
+	if int(item.quantity) > 1:
+		draw_string(ThemeDB.fallback_font, position_value + Vector2(5, -5), str(item.quantity), HORIZONTAL_ALIGNMENT_LEFT, 34, 9, Color.WHITE)
+
+
+func _draw_splitter(cell: Vector2i, splitter: Dictionary) -> void:
+	var center := _cell_center(cell)
+	var rect := Rect2(center - Vector2(15, 15), Vector2(30, 30))
+	draw_rect(rect, Color("#273944"))
+	draw_rect(rect, Color("#d59bff"), false, 2.0)
+	var outputs := logistics.splitter_output_cells(cell)
+	for output_cell in outputs:
+		draw_line(center, _cell_center(output_cell), Color("#d59bff"), 2.0)
+	draw_string(ThemeDB.fallback_font, center + Vector2(-10, 4), "S", HORIZONTAL_ALIGNMENT_CENTER, 20, 12, Color.WHITE)
+	var buffers: Array = splitter.buffers
+	for lane in 2:
+		if not Array(buffers[lane]).is_empty():
+			var item: Dictionary = Array(buffers[lane])[0]
+			draw_circle(center + Vector2(0, -5 if lane == 0 else 5), 4.0, TransportResources.definition(str(item.resource)).visual_color)
+	if logistics_debug_visible:
+		var filter_text := str(splitter.filter_resource)
+		var mode_text := "BAL" if filter_text.is_empty() else ("F:" + filter_text)
+		draw_string(ThemeDB.fallback_font, center + Vector2(-32, -22), mode_text, HORIZONTAL_ALIGNMENT_CENTER, 64, 9, Color("#f3dcff"))
 
 
 func _draw_defense_front_ground() -> void:

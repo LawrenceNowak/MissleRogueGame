@@ -4,8 +4,8 @@ extends RefCounted
 signal changed
 
 const ORE := "ore"
-const MISSILE_AMMO := "missile_ammo"
-const GATLING_AMMO := "gatling_ammo"
+const MISSILE_AMMO := "missile"
+const GATLING_AMMO := "mg_ammo"
 const WOOD := "wood"
 const STONE := "stone"
 const ADVANCED_RESOURCE := "advanced_resource"

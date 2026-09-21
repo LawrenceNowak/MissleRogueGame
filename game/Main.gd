@@ -279,13 +279,14 @@ func _build_ui() -> void:
 	factory_message_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	factory_context_label = _label(factory_hud, "", 15, Color("#e8f0ff"), Rect2(330, 655, 620, 28))
 	factory_context_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	var factory_toolbar := _panel(factory_hud, Rect2(170, 592, 940, 56), Color(0.025, 0.055, 0.07, 0.94))
-	_button(factory_toolbar, "DRILL", Rect2(10, 9, 120, 38), func(): _factory_build("drill"))
-	_button(factory_toolbar, "BELT", Rect2(138, 9, 120, 38), func(): _factory_build("belt"))
-	_button(factory_toolbar, "MG FACTORY", Rect2(266, 9, 138, 38), func(): _factory_build("ammo_factory"))
-	_button(factory_toolbar, "MISSILE FACTORY", Rect2(412, 9, 160, 38), func(): _factory_build("missile_factory"))
-	_button(factory_toolbar, "STORAGE", Rect2(580, 9, 120, 38), func(): _factory_build("storage"))
-	_button(factory_toolbar, "COMMAND VIEW [TAB]", Rect2(708, 9, 220, 38), _toggle_preparation_view)
+	var factory_toolbar := _panel(factory_hud, Rect2(70, 592, 1140, 56), Color(0.025, 0.055, 0.07, 0.94))
+	_button(factory_toolbar, "DRILL", Rect2(10, 9, 100, 38), func(): _factory_build("drill"))
+	_button(factory_toolbar, "BELT", Rect2(118, 9, 100, 38), func(): _factory_build("belt"))
+	_button(factory_toolbar, "SPLITTER", Rect2(226, 9, 110, 38), func(): _factory_build("splitter"))
+	_button(factory_toolbar, "MG FACTORY", Rect2(344, 9, 130, 38), func(): _factory_build("ammo_factory"))
+	_button(factory_toolbar, "MISSILE FACTORY", Rect2(482, 9, 150, 38), func(): _factory_build("missile_factory"))
+	_button(factory_toolbar, "STORAGE", Rect2(640, 9, 110, 38), func(): _factory_build("storage"))
+	_button(factory_toolbar, "COMMAND VIEW [TAB]", Rect2(758, 9, 220, 38), _toggle_preparation_view)
 	var start_attack_button := _button(factory_hud, "BEGIN NEXT ATTACK", Rect2(1010, 18, 245, 46), func(): _request_defense_transition("manual"))
 	start_attack_button.add_theme_font_size_override("font_size", 16)
 
