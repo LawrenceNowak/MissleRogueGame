@@ -170,6 +170,40 @@ func all_items() -> Array[Dictionary]:
 	return result
 
 
+func closest_item(world_position: Vector2, max_distance: float, cell_size: float) -> Dictionary:
+	var best: Dictionary = {}
+	var best_distance := max_distance
+	for item in all_items():
+		var item_position := item_world_position(item, cell_size) if belts.has(item.cell) else Vector2(item.cell) * cell_size + Vector2.ONE * cell_size * 0.5
+		var distance := world_position.distance_to(item_position)
+		if distance < best_distance or (is_equal_approx(distance, best_distance) and (best.is_empty() or int(item.id) < int(best.id))):
+			best = item
+			best_distance = distance
+	return best
+
+
+func take_item(item_id: int) -> Dictionary:
+	for cell in _sorted_cells(belts.keys()):
+		var lanes: Array = belts[cell].lanes
+		for lane in 2:
+			var items: Array = lanes[lane]
+			for index in items.size():
+				if int(items[index].id) == item_id:
+					var item: Dictionary = items[index]
+					items.remove_at(index)
+					return item
+	for cell in _sorted_cells(splitters.keys()):
+		var buffers: Array = splitters[cell].buffers
+		for lane in 2:
+			var items: Array = buffers[lane]
+			for index in items.size():
+				if int(items[index].id) == item_id:
+					var item: Dictionary = items[index]
+					items.remove_at(index)
+					return item
+	return {}
+
+
 func item_count() -> int:
 	return all_items().size()
 

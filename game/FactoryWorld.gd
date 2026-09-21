@@ -6,6 +6,8 @@ signal message_requested(text: String)
 signal credits_found(amount: int)
 signal state_changed
 signal weapon_selected(index: int)
+signal engineering_requested
+signal weapon_placed(item_id: String, weapon_index: int)
 
 const CELL := GameBalance.FACTORY_CELL_SIZE
 const MAP_CELLS := GameBalance.FACTORY_MAP_CELLS
@@ -59,6 +61,8 @@ var belt_visuals := BeltVisualSet.new()
 var effects: Array[Dictionary] = []
 
 var build_kind := ""
+var build_item_id := ""
+var selected_item_id := ""
 var build_rotation := 0
 var preview_cell := Vector2i.ZERO
 var preview_valid := false
@@ -89,6 +93,8 @@ func reset_run() -> void:
 	exhaustion_emitted = false
 	command_confirm_left = 0.0
 	build_kind = ""
+	build_item_id = ""
+	selected_item_id = ""
 	build_rotation = 0
 	explored_cells.clear()
 	mountain_cells.clear()
@@ -119,6 +125,7 @@ func begin_preparation() -> void:
 	stamina = GameBalance.ENGINEER_MAX_STAMINA
 	engineer_position = _cell_center(COMMAND_CELL + Vector2i(-2, 1))
 	build_kind = ""
+	build_item_id = ""
 	command_confirm_left = 0.0
 	for structure in structures:
 		if bool(structure.active): structure.status = "PAUSED"
@@ -133,6 +140,7 @@ func begin_defense() -> void:
 	simulation_active = true
 	transition_locked = false
 	build_kind = ""
+	build_item_id = ""
 	command_confirm_left = 0.0
 	state_changed.emit()
 	queue_redraw()
@@ -282,6 +290,8 @@ func _emit_buffered_output(structure: Dictionary) -> bool:
 func _accept_transport_item(cell: Vector2i, item: Dictionary, source_direction: int, _source_lane: int) -> bool:
 	var front_weapon_index := _front_weapon_index_at(cell)
 	if front_weapon_index >= 0:
+		if not bool(defense_weapons[front_weapon_index].unlocked):
+			return false
 		var expected_resource := _ammo_resource_for_weapon(defense_weapons[front_weapon_index])
 		var quantity := int(item.quantity)
 		if str(item.resource) != expected_resource or inventory.free_space(expected_resource) < quantity:
@@ -335,9 +345,28 @@ func _effective_output_capacity(structure: Dictionary, base_capacity: int) -> in
 func select_build(kind_id: String) -> void:
 	if not active_controls or transition_locked:
 		return
+	selected_item_id = ""
+	build_item_id = ""
 	build_kind = kind_id
 	build_rotation = 0
 	message_requested.emit("PLACE %s  •  R ROTATE  •  RMB CANCEL" % kind_id.replace("_", " ").to_upper())
+	queue_redraw()
+
+
+func select_inventory_item(item_id: String) -> void:
+	selected_item_id = item_id
+	build_kind = ""
+	build_item_id = ""
+	if item_id.is_empty():
+		queue_redraw()
+		return
+	var definition := ItemCatalog.definition(item_id)
+	if definition.placeable:
+		build_kind = definition.placement_definition
+		build_item_id = item_id
+		message_requested.emit("PLACE %s  •  LMB PLACE  R ROTATE  RMB CANCEL" % definition.display_name.to_upper())
+	else:
+		message_requested.emit("SELECTED %s" % definition.display_name.to_upper())
 	queue_redraw()
 
 
@@ -345,6 +374,7 @@ func cancel_build() -> bool:
 	if build_kind.is_empty():
 		return false
 	build_kind = ""
+	build_item_id = ""
 	preview_valid = false
 	message_requested.emit("BUILD CANCELLED")
 	queue_redraw()
@@ -355,11 +385,10 @@ func interact() -> void:
 	if not active_controls or transition_locked:
 		return
 	if engineer_position.distance_to(_cell_center(COMMAND_CELL)) <= 86.0:
-		if command_confirm_left > 0.0:
-			_request_wave("manual")
-		else:
-			command_confirm_left = 3.0
-			message_requested.emit("BEGIN NEXT ATTACK?  PRESS E AGAIN")
+		engineering_requested.emit()
+		message_requested.emit("ENGINEERING PROJECTS / WEAPON WORKSHOP")
+		return
+	if pickup_nearby_transport_item():
 		return
 	var front_weapon_index := _nearest_front_weapon_index()
 	if front_weapon_index >= 0:
@@ -403,10 +432,11 @@ func _unhandled_input(event: InputEvent) -> void:
 	if not active_controls:
 		return
 	if event is InputEventKey and event.pressed and not event.echo:
+		if event.is_action_pressed("interact"):
+			interact()
+			get_viewport().set_input_as_handled()
+			return
 		match event.keycode:
-			KEY_E:
-				interact()
-				get_viewport().set_input_as_handled()
 			KEY_R:
 				if not build_kind.is_empty():
 					build_rotation = (build_rotation + 1) % 4
@@ -478,6 +508,10 @@ func _set_hidden_vein(cell: Vector2i, kind_id: String, amount: int) -> void:
 func _harvest_object(index: int) -> void:
 	var object: Dictionary = world_objects[index]
 	var kind_id := str(object.kind)
+	var rewards := _harvest_rewards(object)
+	if not inventory.can_add_many(rewards):
+		message_requested.emit("INVENTORY FULL — RESOURCE LEFT IN PLACE")
+		return
 	var cost := GameBalance.STAMINA_TREE
 	if kind_id == "small_rock": cost = GameBalance.STAMINA_SMALL_ROCK
 	if kind_id == "large_rock": cost = GameBalance.STAMINA_LARGE_ROCK
@@ -485,34 +519,46 @@ func _harvest_object(index: int) -> void:
 	if kind_id == "crate": cost = 0
 	if not _spend_stamina(cost, kind_id.replace("_", " ").to_upper()):
 		return
+	if not inventory.add_many(rewards):
+		message_requested.emit("INVENTORY CHANGED — TRY AGAIN")
+		return
 	object.active = false
 	var at_position := _cell_center(object.cell)
 	match kind_id:
 		"tree":
-			inventory.add(RunInventory.WOOD, 3)
 			_add_effect(at_position, "+3 WOOD", Color("#92d06d"))
 		"small_rock":
-			inventory.add(RunInventory.STONE, 3)
-			if (int(object.cell.x) + int(object.cell.y)) % 3 == 0: inventory.add(RunInventory.ORE, 1)
 			_add_effect(at_position, "+3 STONE", Color("#c1b8aa"))
 		"large_rock":
-			inventory.add(RunInventory.STONE, 5)
-			inventory.add(RunInventory.ORE, 1)
 			_add_effect(at_position, "+5 STONE  +1 ORE", Color("#d7c7ae"))
 		"surface_ore":
-			inventory.add(RunInventory.ORE, 2)
 			_add_effect(at_position, "+2 ORE", Color("#72d6a0"))
 		"crate":
 			credits_found.emit(25)
-			inventory.add(RunInventory.GATLING_AMMO, 100)
 			_add_effect(at_position, "CACHE: +25 CREDITS  +100 MG", Color("#ffd166"))
 	message_requested.emit("%s CLEARED" % kind_id.replace("_", " ").to_upper())
 	state_changed.emit()
 	queue_redraw()
 
 
+func _harvest_rewards(object: Dictionary) -> Dictionary:
+	match str(object.kind):
+		"tree": return {RunInventory.WOOD: 3}
+		"small_rock":
+			var rewards := {RunInventory.STONE: 3}
+			if (int(object.cell.x) + int(object.cell.y)) % 3 == 0: rewards[RunInventory.ORE] = 1
+			return rewards
+		"large_rock": return {RunInventory.STONE: 5, RunInventory.ORE: 1}
+		"surface_ore": return {RunInventory.ORE: 2}
+		"crate": return {RunInventory.GATLING_AMMO: 100}
+		_: return {}
+
+
 func _dig_cell(cell: Vector2i) -> void:
 	var tile_kind := str(mountain_cells.get(cell, "normal"))
+	if tile_kind not in ["ore", "rare"] and not inventory.can_add(RunInventory.STONE, 1):
+		message_requested.emit("INVENTORY FULL — MOUNTAIN LEFT IN PLACE")
+		return
 	var cost := GameBalance.STAMINA_DIG_HARD if tile_kind == "hard" or tile_kind == "rare" else GameBalance.STAMINA_DIG_NORMAL
 	if not _spend_stamina(cost, "DIG"):
 		return
@@ -522,18 +568,23 @@ func _dig_cell(cell: Vector2i) -> void:
 		message_requested.emit("ENERGY CRYSTAL VEIN DISCOVERED" if tile_kind == "rare" else "RICH ORE DISCOVERED")
 		_add_effect(_cell_center(cell), "DISCOVERY", Color("#c58cff") if tile_kind == "rare" else Color("#72d6a0"))
 	else:
-		inventory.add(RunInventory.STONE, 1)
+		inventory.add_exact(RunInventory.STONE, 1)
 		_add_effect(_cell_center(cell), "+1 STONE", Color("#b8afa3"))
 	state_changed.emit()
 	queue_redraw()
 
 
 func _gather_vein(cell: Vector2i) -> void:
-	if int(vein_amounts.get(cell, 0)) <= 0 or not _spend_stamina(GameBalance.STAMINA_GATHER_ORE, "GATHER ORE"):
+	if int(vein_amounts.get(cell, 0)) <= 0:
 		return
 	var resource_id := RunInventory.ADVANCED_RESOURCE if str(exposed_veins[cell]) == "rare" else RunInventory.ORE
 	var amount := 1 if resource_id == RunInventory.ADVANCED_RESOURCE else 2
-	inventory.add(resource_id, amount)
+	if not inventory.can_add(resource_id, amount):
+		message_requested.emit("INVENTORY FULL — VEIN UNCHANGED")
+		return
+	if not _spend_stamina(GameBalance.STAMINA_GATHER_ORE, "GATHER ORE"):
+		return
+	inventory.add_exact(resource_id, amount)
 	vein_amounts[cell] = maxi(0, int(vein_amounts[cell]) - amount)
 	_add_effect(_cell_center(cell), "+%d %s" % [amount, "CRYSTAL" if resource_id == RunInventory.ADVANCED_RESOURCE else "ORE"], Color("#c58cff") if resource_id == RunInventory.ADVANCED_RESOURCE else Color("#72d6a0"))
 	state_changed.emit()
@@ -544,16 +595,29 @@ func _place_selected_building() -> bool:
 		message_requested.emit("INVALID BUILD LOCATION")
 		return false
 	var recipe: Dictionary = GameBalance.BUILD_RECIPES.get(build_kind, {})
-	if not _can_afford(recipe):
+	if not build_item_id.is_empty():
+		if not inventory.can_remove(build_item_id, 1):
+			message_requested.emit("NO %s IN INVENTORY" % ItemCatalog.definition(build_item_id).display_name.to_upper())
+			return false
+	elif not _can_afford(recipe):
 		message_requested.emit("MISSING BUILD MATERIALS")
 		return false
 	var stamina_cost := int(recipe.get("stamina", 0))
 	if stamina < stamina_cost:
 		message_requested.emit("NOT ENOUGH STAMINA")
 		return false
-	_consume_recipe(recipe)
-	_spend_stamina(stamina_cost, "CONSTRUCTION")
-	if build_kind == "belt":
+	if not _spend_stamina(stamina_cost, "CONSTRUCTION"):
+		return false
+	if not build_item_id.is_empty():
+		inventory.remove(build_item_id, 1)
+	else:
+		_consume_recipe(recipe)
+	if build_kind == "missile_launcher":
+		var missile_index := 1
+		defense_weapons[missile_index].unlocked = true
+		defense_weapons[missile_index].queue_redraw()
+		weapon_placed.emit(RunInventory.MISSILE_LAUNCHER, missile_index)
+	elif build_kind == "belt":
 		logistics.add_belt(preview_cell, build_rotation)
 	elif build_kind == "splitter":
 		logistics.add_splitter(preview_cell, build_rotation)
@@ -598,6 +662,8 @@ func _place_selected_building() -> bool:
 func _can_build(kind_id: String, cell: Vector2i) -> bool:
 	if transition_locked or not _cell_in_bounds(cell) or not explored_cells.has(cell):
 		return false
+	if kind_id == "missile_launcher":
+		return build_item_id == RunInventory.MISSILE_LAUNCHER and inventory.can_remove(build_item_id, 1) and defense_weapons.size() > 1 and not bool(defense_weapons[1].unlocked) and cell == defense_front_cell_for_weapon(1)
 	if mountain_cells.has(cell) or _active_object_at(cell) or cell.distance_to(COMMAND_CELL) < 3.0 or _front_cell_occupied(cell):
 		return false
 	if logistics.cell_occupied(cell) or _find_structure_at(cell) != null:
@@ -610,13 +676,33 @@ func _can_build(kind_id: String, cell: Vector2i) -> bool:
 
 
 func _can_afford(recipe: Dictionary) -> bool:
-	return inventory.can_consume(RunInventory.WOOD, int(recipe.get("wood", 0))) and inventory.can_consume(RunInventory.STONE, int(recipe.get("stone", 0))) and inventory.can_consume(RunInventory.ORE, int(recipe.get("ore", 0)))
+	return inventory.can_remove_many({RunInventory.WOOD: int(recipe.get("wood", 0)), RunInventory.STONE: int(recipe.get("stone", 0)), RunInventory.ORE: int(recipe.get("ore", 0))})
 
 
 func _consume_recipe(recipe: Dictionary) -> void:
-	inventory.consume(RunInventory.WOOD, int(recipe.get("wood", 0)))
-	inventory.consume(RunInventory.STONE, int(recipe.get("stone", 0)))
-	inventory.consume(RunInventory.ORE, int(recipe.get("ore", 0)))
+	inventory.remove_many({RunInventory.WOOD: int(recipe.get("wood", 0)), RunInventory.STONE: int(recipe.get("stone", 0)), RunInventory.ORE: int(recipe.get("ore", 0))})
+
+
+func pickup_nearby_transport_item() -> bool:
+	var item := logistics.closest_item(engineer_position, 54.0, float(CELL))
+	if item.is_empty():
+		return false
+	var item_id := str(item.resource)
+	var quantity := int(item.quantity)
+	if not inventory.can_add(item_id, quantity):
+		message_requested.emit("INVENTORY FULL — BELT ITEM UNTOUCHED")
+		return true
+	var taken := logistics.take_item(int(item.id))
+	if taken.is_empty():
+		return true
+	if not inventory.add_exact(item_id, quantity):
+		push_error("Atomic belt pickup invariant failed after capacity check")
+		return true
+	_add_effect(logistics.item_world_position(item, float(CELL)), "+%d %s" % [quantity, ItemCatalog.definition(item_id).display_name.to_upper()], ItemCatalog.definition(item_id).visual_color)
+	message_requested.emit("PICKED UP %s FROM BELT" % ItemCatalog.definition(item_id).display_name.to_upper())
+	state_changed.emit()
+	queue_redraw()
+	return true
 
 
 func _remove_belt_at(cell: Vector2i) -> void:
@@ -897,9 +983,13 @@ func _update_effects(delta: float) -> void:
 
 func context_text() -> String:
 	if not build_kind.is_empty():
-		return "BUILD: %s  |  LMB place  R rotate  RMB cancel" % build_kind.replace("_", " ").to_upper()
+		var source := "INVENTORY %d" % inventory.amount(build_item_id) if not build_item_id.is_empty() else "MATERIAL RECIPE"
+		return "BUILD: %s  |  %s  |  LMB place  R rotate  RMB cancel" % [build_kind.replace("_", " ").to_upper(), source]
 	if engineer_position.distance_to(_cell_center(COMMAND_CELL)) <= 86.0:
-		return "E  COMMAND CENTER — BEGIN NEXT ATTACK"
+		return "E  COMMAND CENTER — ENGINEERING PROJECTS / WEAPON WORKSHOP"
+	var nearby_item := logistics.closest_item(engineer_position, 54.0, float(CELL))
+	if not nearby_item.is_empty():
+		return "E  PICK UP %s x%d FROM BELT" % [ItemCatalog.definition(str(nearby_item.resource)).display_name.to_upper(), int(nearby_item.quantity)]
 	var front_weapon_index := _nearest_front_weapon_index()
 	if front_weapon_index >= 0:
 		var snapshot := defense_front_snapshot(front_weapon_index)

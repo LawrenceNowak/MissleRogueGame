@@ -35,6 +35,9 @@ var gatling_upgrade_cursor := 0
 var dragging_weapon: PlayerWeapon
 var drag_original_x := 0.0
 var inventory := RunInventory.new()
+var quickbar := QuickbarState.new()
+var research := ResearchState.new()
+var workshop := WeaponWorkshop.new()
 var factory_world: FactoryWorld
 
 var cities: Array[DefenseCity] = []
@@ -83,13 +86,21 @@ var factory_resource_label: Label
 var factory_context_label: Label
 var factory_wave_label: Label
 var factory_message_label: Label
+var factory_inventory_ui: FactoryInventoryUI
+var engineering_ui: EngineeringUI
 
 func _ready() -> void:
 	process_mode = Node.PROCESS_MODE_ALWAYS
 	randomize()
 	_load_save()
+	workshop.setup(inventory, research)
+	quickbar.setup(inventory)
 	_build_ui()
 	inventory.changed.connect(_update_factory_hud)
+	quickbar.selected_changed.connect(_on_quickbar_selected)
+	research.project_revealed.connect(_on_project_revealed)
+	research.project_completed.connect(_on_project_completed)
+	workshop.weapon_fabricated.connect(_on_weapon_fabricated)
 	_show_menu()
 	queue_redraw()
 
@@ -129,6 +140,22 @@ func _process(delta: float) -> void:
 
 func _input(event: InputEvent) -> void:
 	var key_event := event as InputEventKey
+	if phase == Phase.PREPARATION and factory_view_active:
+		if is_instance_valid(engineering_ui) and engineering_ui.visible and (event.is_action_pressed("pause_game") or (key_event != null and key_event.pressed and key_event.keycode == KEY_ESCAPE)):
+			engineering_ui.close()
+			get_viewport().set_input_as_handled()
+			return
+		if event.is_action_pressed("inventory_toggle"):
+			if not engineering_ui.visible:
+				factory_inventory_ui.toggle_inventory()
+			get_viewport().set_input_as_handled()
+			return
+		if not engineering_ui.visible and not factory_inventory_ui.inventory_panel.visible:
+			for slot_index in QuickbarState.SLOT_COUNT:
+				if event.is_action_pressed("quickbar_slot_%d" % (slot_index + 1)):
+					quickbar.select(slot_index)
+					get_viewport().set_input_as_handled()
+					return
 	if phase == Phase.PREPARATION and factory_view_active and is_instance_valid(factory_world) and not factory_world.build_kind.is_empty() and (event.is_action_pressed("pause_game") or (key_event != null and key_event.pressed and key_event.keycode == KEY_ESCAPE)):
 		factory_world.cancel_build()
 		get_viewport().set_input_as_handled()
@@ -279,14 +306,16 @@ func _build_ui() -> void:
 	factory_message_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	factory_context_label = _label(factory_hud, "", 15, Color("#e8f0ff"), Rect2(330, 655, 620, 28))
 	factory_context_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	var factory_toolbar := _panel(factory_hud, Rect2(70, 592, 1140, 56), Color(0.025, 0.055, 0.07, 0.94))
+	factory_context_label.position.y = 612
+	var factory_toolbar := _panel(factory_hud, Rect2(70, 550, 1140, 56), Color(0.025, 0.055, 0.07, 0.94))
 	_button(factory_toolbar, "DRILL", Rect2(10, 9, 100, 38), func(): _factory_build("drill"))
 	_button(factory_toolbar, "BELT", Rect2(118, 9, 100, 38), func(): _factory_build("belt"))
 	_button(factory_toolbar, "SPLITTER", Rect2(226, 9, 110, 38), func(): _factory_build("splitter"))
 	_button(factory_toolbar, "MG FACTORY", Rect2(344, 9, 130, 38), func(): _factory_build("ammo_factory"))
 	_button(factory_toolbar, "MISSILE FACTORY", Rect2(482, 9, 150, 38), func(): _factory_build("missile_factory"))
 	_button(factory_toolbar, "STORAGE", Rect2(640, 9, 110, 38), func(): _factory_build("storage"))
-	_button(factory_toolbar, "COMMAND VIEW [TAB]", Rect2(758, 9, 220, 38), _toggle_preparation_view)
+	_button(factory_toolbar, "COMMAND VIEW [TAB]", Rect2(758, 9, 210, 38), _toggle_preparation_view)
+	_button(factory_toolbar, "INVENTORY [I]", Rect2(976, 9, 154, 38), func(): factory_inventory_ui.toggle_inventory())
 	var start_attack_button := _button(factory_hud, "BEGIN NEXT ATTACK", Rect2(1010, 18, 245, 46), func(): _request_defense_transition("manual"))
 	start_attack_button.add_theme_font_size_override("font_size", 16)
 
@@ -295,7 +324,7 @@ func _build_ui() -> void:
 	defense_city_label = _label(defense_panel, "", 16, Color("e8f0ff"), Rect2(18, 56, 314, 48))
 	repair_button = _button(defense_panel, "REPAIR CITY — 30", Rect2(18, 108, 314, 38), _repair_city)
 	shield_button = _button(defense_panel, "BUILD SHIELD — 60", Rect2(18, 151, 314, 38), _buy_shield)
-	gatling_button = _button(defense_panel, "UNLOCK MISSILE — 60", Rect2(18, 199, 314, 38), _buy_gatling)
+	gatling_button = _button(defense_panel, "OPEN ENGINEERING PROJECTS", Rect2(18, 199, 314, 38), _buy_gatling)
 	missile_upgrade_button = _button(defense_panel, "UPGRADE MISSILE — 50", Rect2(18, 242, 314, 38), _buy_missile_upgrade)
 	gatling_upgrade_button = _button(defense_panel, "UPGRADE BASIC MG — 50", Rect2(18, 285, 314, 38), _buy_gatling_upgrade)
 	charm_button = _button(defense_panel, "BUY CHARM — %d" % GameBalance.CHARM_COST, Rect2(18, 328, 314, 38), _buy_charm)
@@ -327,6 +356,17 @@ func _build_ui() -> void:
 	result_summary.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	_button(result_panel, "NEW RUN", Rect2(80, 320, 200, 52), _start_run)
 	_button(result_panel, "MAIN MENU", Rect2(320, 320, 200, 52), _show_menu)
+
+	factory_inventory_ui = FactoryInventoryUI.new()
+	layer.add_child(factory_inventory_ui)
+	factory_inventory_ui.setup(inventory, quickbar)
+	factory_inventory_ui.panel_visibility_changed.connect(_on_factory_modal_visibility_changed)
+	engineering_ui = EngineeringUI.new()
+	layer.add_child(engineering_ui)
+	engineering_ui.setup(inventory, research, workshop)
+	engineering_ui.close_requested.connect(_on_engineering_closed)
+	engineering_ui.project_completion_requested.connect(_complete_research_project)
+	engineering_ui.fabrication_requested.connect(_fabricate_weapon)
 
 func _panel(parent: Node, rect: Rect2, color: Color) -> Panel:
 	var panel := Panel.new()
@@ -368,6 +408,8 @@ func _start_run() -> void:
 	waves_cleared = 0
 	credits = 20
 	inventory.reset()
+	quickbar.reset_run()
+	research.begin_run()
 	run_components = 0
 	rapid_fire_left = 0.0
 	charms.clear()
@@ -413,6 +455,8 @@ func _build_battlefield() -> void:
 	factory_world.message_requested.connect(_factory_message)
 	factory_world.credits_found.connect(_on_factory_credits_found)
 	factory_world.weapon_selected.connect(_on_factory_weapon_selected)
+	factory_world.engineering_requested.connect(_open_engineering)
+	factory_world.weapon_placed.connect(_on_factory_weapon_placed)
 	_select_weapon(0)
 	cities[0].selected = true
 
@@ -446,6 +490,8 @@ func _begin_wave(number: int) -> void:
 	_set_defense_nodes_visible(true)
 	hud.visible = true
 	factory_hud.visible = false
+	factory_inventory_ui.set_factory_visible(false)
+	engineering_ui.visible = false
 	spawn_queue = GameBalance.wave_definition(number).duplicate(true)
 	spawn_timer = 0.35
 	spawn_finished = spawn_queue.is_empty()
@@ -668,9 +714,12 @@ func _begin_preparation(_first_preparation: bool = false) -> void:
 		factory_world.set_factory_view(true)
 	hud.visible = false
 	factory_hud.visible = true
+	factory_inventory_ui.set_factory_visible(true)
 	defense_panel.visible = false
 	upgrade_panel.visible = false
 	_factory_message("PREPARATION — FACTORY PAUSED")
+	if not _first_preparation and current_wave >= 1:
+		research.reveal_project(ResearchProjects.MISSILE_LAUNCHER_DEVELOPMENT)
 	_update_factory_hud()
 
 func _request_defense_transition(_reason: String = "manual") -> void:
@@ -693,10 +742,13 @@ func _toggle_preparation_view() -> void:
 	if phase != Phase.PREPARATION or incoming_timer > 0.0:
 		return
 	factory_view_active = not factory_view_active
+	factory_inventory_ui.close_inventory()
+	engineering_ui.visible = false
 	if is_instance_valid(factory_world):
 		factory_world.set_factory_view(factory_view_active)
 	_set_defense_nodes_visible(not factory_view_active)
 	factory_hud.visible = factory_view_active
+	factory_inventory_ui.set_factory_visible(factory_view_active)
 	hud.visible = not factory_view_active
 	defense_panel.visible = not factory_view_active
 	_refresh_defense_ui()
@@ -827,14 +879,7 @@ func _buy_shield() -> void:
 	_refresh_defense_ui()
 
 func _buy_gatling() -> void:
-	if credits < GameBalance.MISSILE_UNLOCK_COST or weapons[1].unlocked or current_wave < 1:
-		return
-	credits -= GameBalance.MISSILE_UNLOCK_COST
-	weapons[1].unlocked = true
-	weapons[1].queue_redraw()
-	audio_cue_requested.emit("upgrade_purchase")
-	_show_banner("MISSILE LAUNCHER UNLOCKED — PRESS 2", 1.4)
-	_refresh_defense_ui()
+	_open_engineering()
 
 func _buy_missile_upgrade() -> void:
 	if credits < GameBalance.WEAPON_UPGRADE_COST or not weapons[1].unlocked:
@@ -915,6 +960,8 @@ func _show_result(won: bool) -> void:
 	pause_panel.visible = false
 	result_panel.visible = true
 	factory_hud.visible = false
+	factory_inventory_ui.set_factory_visible(false)
+	engineering_ui.visible = false
 	if is_instance_valid(factory_world):
 		factory_world.simulation_active = false
 		factory_world.set_factory_view(false)
@@ -933,6 +980,8 @@ func _show_menu() -> void:
 	menu_components_label.text = "Persistent Components: %d" % persistent_components
 	hud.visible = false
 	factory_hud.visible = false
+	if is_instance_valid(factory_inventory_ui): factory_inventory_ui.set_factory_visible(false)
+	if is_instance_valid(engineering_ui): engineering_ui.visible = false
 	defense_panel.visible = false
 	upgrade_panel.visible = false
 	pause_panel.visible = false
@@ -963,8 +1012,8 @@ func _refresh_defense_ui() -> void:
 	defense_city_label.text = "CITY %d   HP %d / %d\nShield: %s" % [selected_city_index + 1, int(city.health), int(city.max_health), shield_text]
 	repair_button.disabled = credits < GameBalance.CITY_REPAIR_COST or city.destroyed or city.health >= city.max_health
 	shield_button.disabled = credits < GameBalance.SHIELD_COST or city.destroyed or city.shield_max > 0.0
-	gatling_button.disabled = credits < GameBalance.MISSILE_UNLOCK_COST or weapons[1].unlocked or current_wave < 1
-	gatling_button.text = "MISSILE LAUNCHER OWNED" if weapons[1].unlocked else ("AVAILABLE AFTER WAVE 1" if current_wave < 1 else "UNLOCK MISSILE — 60")
+	gatling_button.disabled = false
+	gatling_button.text = "MISSILE LAUNCHER PLACED" if weapons[1].unlocked else "OPEN ENGINEERING PROJECTS"
 	missile_upgrade_button.disabled = credits < GameBalance.WEAPON_UPGRADE_COST or not weapons[1].unlocked
 	gatling_upgrade_button.disabled = credits < GameBalance.WEAPON_UPGRADE_COST
 	charm_button.disabled = credits < GameBalance.CHARM_COST or charms.size() >= 3
@@ -1031,6 +1080,7 @@ func _factory_message(text_value: String, duration: float = 1.4) -> void:
 
 func _factory_build(kind_id: String) -> void:
 	if phase == Phase.PREPARATION and factory_view_active and is_instance_valid(factory_world):
+		quickbar.deselect()
 		factory_world.select_build(kind_id)
 
 func _on_factory_credits_found(amount: int) -> void:
@@ -1042,6 +1092,68 @@ func _on_factory_weapon_selected(index: int) -> void:
 	_select_weapon(index)
 	if is_instance_valid(factory_world):
 		factory_world.queue_redraw()
+
+
+func _on_quickbar_selected(item_id: String, _slot_index: int) -> void:
+	if phase == Phase.PREPARATION and factory_view_active and is_instance_valid(factory_world):
+		factory_world.select_inventory_item(item_id)
+
+
+func _on_factory_modal_visibility_changed(is_open: bool) -> void:
+	if is_instance_valid(factory_world):
+		factory_world.active_controls = phase == Phase.PREPARATION and factory_view_active and not is_open and not engineering_ui.visible and not factory_world.transition_locked
+
+
+func _open_engineering() -> void:
+	if phase != Phase.PREPARATION:
+		return
+	if not factory_view_active:
+		_toggle_preparation_view()
+	factory_inventory_ui.close_inventory()
+	engineering_ui.open()
+	if is_instance_valid(factory_world):
+		factory_world.active_controls = false
+
+
+func _on_engineering_closed() -> void:
+	_on_factory_modal_visibility_changed(false)
+
+
+func _complete_research_project(project_id: String) -> void:
+	if research.complete_project(project_id, inventory):
+		audio_cue_requested.emit("upgrade_purchase")
+		_factory_message("MISSILE LAUNCHER BLUEPRINT UNLOCKED")
+	else:
+		_factory_message("PROJECT REQUIREMENTS NOT MET")
+	engineering_ui.refresh()
+
+
+func _fabricate_weapon(recipe_id: String) -> void:
+	if workshop.fabricate(recipe_id):
+		audio_cue_requested.emit("upgrade_purchase")
+		_factory_message("MISSILE LAUNCHER FABRICATED — SELECT IT FROM QUICKBAR")
+	else:
+		_factory_message("WORKSHOP MATERIALS OR INVENTORY SPACE MISSING")
+	engineering_ui.refresh()
+
+
+func _on_project_revealed(project_id: String) -> void:
+	if project_id == ResearchProjects.MISSILE_LAUNCHER_DEVELOPMENT:
+		_factory_message("NEW ENGINEERING PROJECT: MISSILE LAUNCHER DEVELOPMENT", 2.4)
+
+
+func _on_project_completed(_project_id: String) -> void:
+	_save_persistent()
+
+
+func _on_weapon_fabricated(_item_id: String, _quantity: int) -> void:
+	factory_inventory_ui.refresh()
+
+
+func _on_factory_weapon_placed(item_id: String, weapon_index: int) -> void:
+	_select_weapon(weapon_index)
+	_factory_message("%s LINKED TO DEFENSE FRONT AND MISSILE SUPPLY NODE" % ItemCatalog.definition(item_id).display_name.to_upper(), 2.2)
+	_refresh_defense_ui()
 
 func _update_factory_hud() -> void:
 	if factory_hud == null or not factory_hud.visible or not is_instance_valid(factory_world):
@@ -1093,8 +1205,9 @@ func _load_save() -> void:
 	var parsed = JSON.parse_string(file.get_as_text())
 	if parsed is Dictionary:
 		persistent_components = int(parsed.get("components", 0))
+		research.import_persistent(Dictionary(parsed.get("research", {})))
 
 func _save_persistent() -> void:
 	var file := FileAccess.open(SAVE_PATH, FileAccess.WRITE)
 	if file != null:
-		file.store_string(JSON.stringify({"components": persistent_components}))
+		file.store_string(JSON.stringify({"components": persistent_components, "research": research.export_persistent()}))

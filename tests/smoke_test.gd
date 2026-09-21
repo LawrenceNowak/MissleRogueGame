@@ -43,6 +43,9 @@ func _run() -> void:
 	var game = packed.instantiate()
 	root.add_child(game)
 	await process_frame
+	game.research.completed_projects.clear()
+	game.research.unlocked_blueprints.clear()
+	game.research.revealed_projects.clear()
 	game._start_run()
 	await process_frame
 	var factory: FactoryWorld = game.factory_world
@@ -53,6 +56,7 @@ func _run() -> void:
 	check(game.weapons[1].kind == PlayerWeapon.Kind.MISSILE and not game.weapons[1].unlocked, "The Missile Launcher must begin locked")
 	check(game.inventory.amount(RunInventory.GATLING_AMMO) == 1000, "Basic MG must start with 1000 rounds")
 	check(game.inventory.amount(RunInventory.MISSILE_AMMO) == 3 and game.inventory.capacity(RunInventory.MISSILE_AMMO) == 6, "Missiles must start scarce at 3 of 6")
+	check(game.inventory.amount(RunInventory.BELT) == GameBalance.STARTING_BELTS and game.quickbar.item_at(0) == RunInventory.BELT, "Starting placeables must exist in authoritative inventory and quickbar references")
 	check(factory.defense_weapons[0] == game.weapons[0] and factory.defense_weapons[1] == game.weapons[1], "Factory front nodes must reference the exact combat weapon objects")
 	check(factory.defense_cities[0] == game.cities[0] and factory.defense_front_cell_for_weapon(0).y == FactoryWorld.DEFENSE_FRONT_ROW, "The northern front must reference the exact combat cities and weapons")
 	var original_mg_front_cell := factory.defense_front_cell_for_weapon(0)
@@ -67,8 +71,14 @@ func _run() -> void:
 	var tree: Dictionary = factory.world_objects[tree_index]
 	factory.engineer_position = factory._cell_center(tree.cell + Vector2i.RIGHT)
 	var stamina_before_tree: int = factory.stamina
+	var normal_slot_capacity: int = game.inventory.slot_capacity
+	game.inventory.slot_capacity = game.inventory.used_slots()
+	factory.interact()
+	check(bool(tree.active) and factory.stamina == stamina_before_tree and game.inventory.amount(RunInventory.WOOD) == 0, "Full inventory must leave a gathered resource and stamina untouched")
+	game.inventory.slot_capacity = normal_slot_capacity
 	factory.interact()
 	check(not bool(tree.active) and game.inventory.amount(RunInventory.WOOD) == 3 and factory.stamina == stamina_before_tree - 5, "Chopping a tree must cost 5 stamina and award Wood")
+	check(game.quickbar.slots.has(RunInventory.WOOD), "First manual acquisition must auto-assign the item to an empty quickbar shortcut")
 	var rock_index := factory.world_objects.find_custom(func(object): return object.kind == "small_rock" and object.active)
 	var rock: Dictionary = factory.world_objects[rock_index]
 	factory.engineer_position = factory._cell_center(rock.cell + Vector2i.RIGHT)
@@ -81,6 +91,17 @@ func _run() -> void:
 	var ore_before: int = game.inventory.amount(RunInventory.ORE)
 	factory.interact()
 	check(game.inventory.amount(RunInventory.ORE) == ore_before + 2, "Surface Ore must bootstrap the run inventory")
+	var inventory_belt_cell := Vector2i(27, 20)
+	_clear_factory_cell(factory, inventory_belt_cell)
+	var belts_before: int = game.inventory.amount(RunInventory.BELT)
+	factory.select_inventory_item(RunInventory.BELT)
+	factory.preview_cell = inventory_belt_cell
+	factory.preview_valid = factory._can_build("belt", inventory_belt_cell)
+	check(factory._place_selected_building() and game.inventory.amount(RunInventory.BELT) == belts_before - 1, "Valid quickbar placement must consume exactly one physical Belt item")
+	var belts_after_valid: int = game.inventory.amount(RunInventory.BELT)
+	factory.preview_cell = inventory_belt_cell
+	check(not factory._place_selected_building() and game.inventory.amount(RunInventory.BELT) == belts_after_valid, "Invalid placement must not consume the selected inventory item")
+	factory.cancel_build()
 	var mountain_cell: Vector2i = factory.mountain_cells.keys()[0]
 	var mountain_kind := str(factory.mountain_cells[mountain_cell])
 	var dig_cost := GameBalance.STAMINA_DIG_HARD if mountain_kind in ["hard", "rare"] else GameBalance.STAMINA_DIG_NORMAL
@@ -142,6 +163,30 @@ func _run() -> void:
 	check(game.phase == game.Phase.PREPARATION and not game.factory_view_active and not factory.simulation_active, "Tab must inspect Defense without starting combat or production")
 	game._toggle_preparation_view()
 	check(game.factory_view_active and factory.stamina > 0, "Tab must return to the persistent Factory state without changing stamina")
+	game.current_wave = 1
+	game._begin_preparation(false)
+	check(game.research.revealed_projects.has(ResearchProjects.MISSILE_LAUNCHER_DEVELOPMENT), "Returning after wave one must reveal the Guided Weapons project without granting a launcher")
+	check(game.inventory.amount(RunInventory.MISSILE_LAUNCHER) == 0 and not game.weapons[1].unlocked, "Research reveal must not create or place a weapon")
+	var research_project := ResearchProjects.definition(ResearchProjects.MISSILE_LAUNCHER_DEVELOPMENT)
+	var locked_missiles: int = game.inventory.amount(RunInventory.MISSILE_AMMO)
+	check(not factory._accept_transport_item(missile_front_cell, {"resource": RunInventory.MISSILE_AMMO, "quantity": 1}, 3, 0) and game.inventory.amount(RunInventory.MISSILE_AMMO) == locked_missiles, "Locked weapon supply endpoints must reject packets without deleting them")
+	var ore_before_failed_research: int = game.inventory.amount(RunInventory.ORE)
+	game.inventory.set_amount(RunInventory.ADVANCED_RESOURCE, 0)
+	check(not game.research.complete_project(ResearchProjects.MISSILE_LAUNCHER_DEVELOPMENT, game.inventory) and game.inventory.amount(RunInventory.ORE) == ore_before_failed_research, "Insufficient research must consume no partial materials")
+	for item_id in Dictionary(research_project.costs): game.inventory.set_amount(str(item_id), int(research_project.costs[item_id]))
+	check(game.research.complete_project(ResearchProjects.MISSILE_LAUNCHER_DEVELOPMENT, game.inventory), "Configured project costs must complete Missile Launcher research")
+	check(game.research.has_blueprint(RunInventory.MISSILE_LAUNCHER) and game.inventory.amount(RunInventory.MISSILE_LAUNCHER) == 0, "Completed research must grant permanent knowledge, not a free launcher")
+	var launcher_recipe := WeaponRecipes.definition(WeaponRecipes.MISSILE_LAUNCHER_RECIPE)
+	check(not game.workshop.fabricate(WeaponRecipes.MISSILE_LAUNCHER_RECIPE), "Workshop must reject fabrication without the separate per-launcher cost")
+	for item_id in Dictionary(launcher_recipe.inputs): game.inventory.set_amount(str(item_id), int(launcher_recipe.inputs[item_id]))
+	check(game.workshop.fabricate(WeaponRecipes.MISSILE_LAUNCHER_RECIPE) and game.inventory.amount(RunInventory.MISSILE_LAUNCHER) == 1, "Workshop must fabricate one carried Missile Launcher")
+	var launcher_slot: int = game.quickbar.slots.find(RunInventory.MISSILE_LAUNCHER)
+	check(launcher_slot >= 0, "First fabricated launcher must be assigned to the first empty quickbar slot")
+	game.quickbar.select(launcher_slot)
+	factory.preview_cell = missile_front_cell
+	factory.preview_valid = factory._can_build("missile_launcher", missile_front_cell)
+	check(factory._place_selected_building(), "Fabricated launcher must place only on its defense-front node")
+	check(game.inventory.amount(RunInventory.MISSILE_LAUNCHER) == 0 and game.weapons[1].unlocked and factory.defense_front_snapshot(1).weapon == game.weapons[1], "Weapon placement must consume one item and activate the one shared defense/factory weapon identity")
 	game._begin_wave(1)
 	check(game.phase == game.Phase.DEFENSE and factory.simulation_active and not factory.visible, "Starting a wave must hide Factory controls but activate off-screen simulation")
 	var mg_before_production: int = game.inventory.amount(RunInventory.GATLING_AMMO)
@@ -168,11 +213,6 @@ func _run() -> void:
 	var mg_before_shot: int = game.inventory.amount(RunInventory.GATLING_AMMO)
 	check(game._attempt_fire_weapon(game.weapons[0]) and game.inventory.amount(RunInventory.GATLING_AMMO) == mg_before_shot - 1, "Basic MG manual fire must consume exactly one round")
 	check(int(factory.defense_front_snapshot(0).ammo) == mg_before_shot - 1, "Factory-front MG ammo must update immediately when that exact combat gun fires")
-	game.credits = 100
-	game.current_wave = 1
-	game._buy_gatling()
-	check(game.weapons[1].unlocked and game.credits == 40, "Missile Launcher must unlock after wave one for 60 Credits")
-	check(bool(factory.defense_front_snapshot(1).unlocked), "Missile unlock state must synchronize to the same Factory-front node")
 	game.weapons[1].aim_position = Vector2(620, 220)
 	game.weapons[1].cooldown_left = 0.0
 	var missiles_before_shot: int = game.inventory.amount(RunInventory.MISSILE_AMMO)
@@ -216,6 +256,7 @@ func _run() -> void:
 	game._start_run()
 	await process_frame
 	check(game.phase == game.Phase.PREPARATION and game.factory_world.structures.is_empty() and game.factory_world.logistics.item_count() == 0 and game.inventory.amount(RunInventory.GATLING_AMMO) == 1000, "New Run must reset Factory construction, physical transport items, ammunition, and phase")
+	check(game.research.has_blueprint(RunInventory.MISSILE_LAUNCHER) and game.inventory.amount(RunInventory.MISSILE_LAUNCHER) == 0 and not game.weapons[1].unlocked, "New Run must retain blueprint knowledge but reset fabricated and placed launchers")
 	check(game.factory_world.explored_cells.size() == initial_fog_count, "New Run must reset fog to the starting reveal")
 	for cycle_wave in range(1, 4):
 		game._begin_wave(cycle_wave)
@@ -244,10 +285,11 @@ func _run() -> void:
 	root.add_child(reloaded_game)
 	await process_frame
 	check(reloaded_game.persistent_components == 7, "Persistent components must survive a save reload")
+	check(reloaded_game.research.has_blueprint(RunInventory.MISSILE_LAUNCHER), "Completed weapon blueprint knowledge must survive the existing profile save")
 	check(GameBalance.wave_definition(1).size() == 5, "Wave one must retain its five-threat teaching wave")
 	check(GameBalance.wave_definition(4).any(func(entry): return entry.kind == "mirv"), "Wave four must still introduce MIRVs")
 	if failures.is_empty():
-		print("SMOKE TEST PASS: two-screen exploration, stamina, logistics, combat production, arsenal, boss, defeat, and reset")
+		print("SMOKE TEST PASS: inventory quickbar, research/fabrication, two-screen logistics, combat, boss, defeat, and reset")
 		quit(0)
 	else:
 		print("SMOKE TEST FAILURES: ", failures)
