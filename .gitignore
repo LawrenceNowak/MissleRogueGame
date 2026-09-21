@@ -15,3 +15,8 @@ export_credentials.cfg
 .mono/
 data_*/
 mono_crash.*.json
+
+# Local exports and developer artifacts
+builds/
+exports/
+*.log
