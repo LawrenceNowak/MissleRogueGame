@@ -307,6 +307,20 @@ func lane_path_points(cell: Vector2i, lane: int, cell_size: float, samples := 8)
 	return points
 
 
+func nearest_lane(cell: Vector2i, world_position: Vector2, cell_size: float) -> int:
+	if not belts.has(cell):
+		return -1
+	var best_lane := 0
+	var best_distance := INF
+	for lane in 2:
+		for point in lane_path_points(cell, lane, cell_size, 12):
+			var distance := world_position.distance_squared_to(point)
+			if distance < best_distance:
+				best_distance = distance
+				best_lane = lane
+	return best_lane
+
+
 func item_world_position(item: Dictionary, cell_size: float) -> Vector2:
 	if not belts.has(item.cell):
 		return Vector2(item.cell) * cell_size + Vector2.ONE * cell_size * 0.5

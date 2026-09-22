@@ -58,6 +58,8 @@ var logistics := LogisticsNetwork.new()
 var belts: Dictionary = logistics.belts
 var splitters: Dictionary = logistics.splitters
 var belt_visuals := BeltVisualSet.new()
+var camera_controller := FactoryCameraController.new()
+var loose_pickups: Array[Dictionary] = []
 var effects: Array[Dictionary] = []
 
 var build_kind := ""
@@ -68,6 +70,7 @@ var preview_cell := Vector2i.ZERO
 var preview_valid := false
 var next_structure_id := 0
 var production_totals := {"ore": 0, "mg": 0, "missiles": 0}
+var next_loose_pickup_id := 1
 var defense_weapons: Array = []
 var defense_cities: Array = []
 
@@ -75,6 +78,7 @@ var defense_cities: Array = []
 func setup(shared_inventory: RunInventory) -> void:
 	inventory = shared_inventory
 	belt_visuals.fallback = BELT_TEXTURE
+	camera_controller.setup(VIEW_SIZE, Vector2(MAP_CELLS * CELL))
 	reset_run()
 
 
@@ -106,14 +110,17 @@ func reset_run() -> void:
 	belts = logistics.belts
 	splitters = logistics.splitters
 	logistics_accumulator = 0.0
+	loose_pickups.clear()
 	effects.clear()
 	next_structure_id = 0
+	next_loose_pickup_id = 1
 	production_totals = {"ore": 0, "mg": 0, "missiles": 0}
+	camera_controller.reset()
 	_generate_map()
 	_reveal_defense_front()
 	_reveal_around(COMMAND_CELL, GameBalance.FOG_REVEAL_RADIUS)
 	_recalculate_capacities()
-	_update_camera()
+	_update_camera(0.0, true)
 	state_changed.emit()
 	queue_redraw()
 
@@ -137,6 +144,7 @@ func begin_preparation() -> void:
 
 func begin_defense() -> void:
 	active_controls = false
+	camera_controller.end_pan()
 	simulation_active = true
 	transition_locked = false
 	build_kind = ""
@@ -150,7 +158,7 @@ func set_factory_view(is_active: bool) -> void:
 	visible = is_active
 	active_controls = is_active and not simulation_active and not transition_locked
 	if is_active:
-		_update_camera()
+		_update_camera(0.0, true)
 	queue_redraw()
 
 
@@ -161,6 +169,7 @@ func _process(delta: float) -> void:
 	if simulation_active:
 		simulate_factory(delta)
 	if not active_controls:
+		camera_controller.end_pan()
 		queue_redraw()
 		return
 	var movement := Vector2(
@@ -177,10 +186,12 @@ func _process(delta: float) -> void:
 		_reveal_around(_world_to_cell(engineer_position), GameBalance.FOG_REVEAL_RADIUS)
 	else:
 		walk_time = 0.0
+	if Input.is_action_pressed("interact"):
+		pickup_all_nearby_physical_items()
 	if not build_kind.is_empty():
 		preview_cell = _world_to_cell(to_local(get_viewport().get_mouse_position()))
 		preview_valid = _can_build(build_kind, preview_cell)
-	_update_camera()
+	_update_camera(delta)
 	queue_redraw()
 
 
@@ -433,6 +444,11 @@ func interact() -> void:
 func _unhandled_input(event: InputEvent) -> void:
 	if not active_controls:
 		return
+	if event is InputEventMouseMotion and camera_controller.panning:
+		camera_controller.pan_by(event.relative)
+		_update_camera()
+		get_viewport().set_input_as_handled()
+		return
 	if event is InputEventKey and event.pressed and not event.echo:
 		if event.is_action_pressed("interact"):
 			interact()
@@ -457,15 +473,31 @@ func _unhandled_input(event: InputEvent) -> void:
 				message_requested.emit("LOGISTICS DEBUG %s" % ("ON" if logistics_debug_visible else "OFF"))
 				queue_redraw()
 				get_viewport().set_input_as_handled()
-	if event is InputEventMouseButton and event.pressed:
+	if event is InputEventMouseButton:
+		if event.button_index == MOUSE_BUTTON_MIDDLE:
+			if event.pressed:
+				camera_controller.begin_pan()
+			else:
+				camera_controller.end_pan()
+			get_viewport().set_input_as_handled()
+			return
+		if not event.pressed:
+			return
+		if event.button_index in [MOUSE_BUTTON_WHEEL_UP, MOUSE_BUTTON_WHEEL_DOWN]:
+			var zoom_direction := 1 if event.button_index == MOUSE_BUTTON_WHEEL_UP else -1
+			camera_controller.request_zoom(zoom_direction, event.position, to_local(event.position))
+			get_viewport().set_input_as_handled()
+			return
 		if event.button_index == MOUSE_BUTTON_LEFT and not build_kind.is_empty():
 			preview_cell = _world_to_cell(to_local(event.position))
 			_place_selected_building()
 			get_viewport().set_input_as_handled()
 		elif event.button_index == MOUSE_BUTTON_LEFT and not selected_item_id.is_empty():
-			var insertion_cell := _world_to_cell(to_local(event.position))
+			var insertion_world := to_local(event.position)
+			var insertion_cell := _world_to_cell(insertion_world)
 			if belts.has(insertion_cell):
-				insert_selected_item_on_belt(insertion_cell)
+				var preferred_lane := logistics.nearest_lane(insertion_cell, insertion_world, float(CELL))
+				insert_selected_item_on_belt(insertion_cell, preferred_lane)
 				get_viewport().set_input_as_handled()
 		elif event.button_index == MOUSE_BUTTON_RIGHT:
 			if not cancel_build():
@@ -698,27 +730,119 @@ func _consume_recipe(recipe: Dictionary) -> void:
 
 
 func pickup_nearby_transport_item() -> bool:
-	var item := logistics.closest_item(engineer_position, GameBalance.BELT_PICKUP_RADIUS, float(CELL))
-	if item.is_empty():
-		return false
-	var item_id := str(item.resource)
-	var quantity := int(item.quantity)
-	if not inventory.can_add(item_id, quantity):
-		message_requested.emit("INVENTORY FULL — BELT ITEM UNTOUCHED")
-		return true
-	var taken := logistics.take_item(int(item.id))
-	if taken.is_empty():
-		return true
-	if not inventory.add_exact(item_id, quantity):
-		if not logistics.restore_taken_item(taken):
-			push_error("Atomic belt pickup rollback failed")
-		message_requested.emit("PICKUP CANCELLED — BELT ITEM RESTORED")
-		return true
-	_add_effect(logistics.item_world_position(item, float(CELL)), "+%d %s" % [quantity, ItemCatalog.definition(item_id).display_name.to_upper()], ItemCatalog.definition(item_id).visual_color)
-	message_requested.emit("PICKED UP %s FROM BELT" % ItemCatalog.definition(item_id).display_name.to_upper())
+	return _pickup_one_nearby_physical_item() != 0
+
+
+func pickup_all_nearby_physical_items() -> int:
+	var collected := 0
+	for _attempt in GameBalance.PICKUP_MAX_PER_TICK:
+		var result := _pickup_one_nearby_physical_item()
+		if result != 1:
+			break
+		collected += 1
+	return collected
+
+
+func spawn_loose_pickup(item_id: String, quantity: int, world_position: Vector2) -> Dictionary:
+	if quantity <= 0 or not ItemCatalog.has(item_id) or not ItemCatalog.definition(item_id).transportable:
+		return {}
+	var pickup := {
+		"id": next_loose_pickup_id,
+		"item_id": item_id,
+		"quantity": quantity,
+		"position": world_position,
+	}
+	next_loose_pickup_id += 1
+	loose_pickups.append(pickup)
+	queue_redraw()
+	return pickup
+
+
+func _pickup_one_nearby_physical_item() -> int:
+	var candidate := _nearest_pickup_candidate()
+	if candidate.is_empty():
+		return 0
+	if not bool(candidate.eligible):
+		message_requested.emit("INVENTORY FULL — PHYSICAL ITEM UNTOUCHED")
+		return 2
+	var item_id := str(candidate.item_id)
+	var quantity := int(candidate.quantity)
+	var picked_position: Vector2 = candidate.position
+	if str(candidate.kind) == "belt":
+		var taken := logistics.take_item(int(candidate.id))
+		if taken.is_empty():
+			return 0
+		if not inventory.add_exact(item_id, quantity):
+			if not logistics.restore_taken_item(taken):
+				push_error("Atomic Belt pickup rollback failed")
+			message_requested.emit("PICKUP CANCELLED — BELT ITEM RESTORED")
+			return 2
+	else:
+		var pickup_index := loose_pickups.find_custom(func(pickup): return int(pickup.id) == int(candidate.id))
+		if pickup_index < 0:
+			return 0
+		var loose_pickup: Dictionary = loose_pickups[pickup_index]
+		loose_pickups.remove_at(pickup_index)
+		if not inventory.add_exact(item_id, quantity):
+			loose_pickups.insert(pickup_index, loose_pickup)
+			message_requested.emit("PICKUP CANCELLED — WORLD ITEM RESTORED")
+			return 2
+	var definition := ItemCatalog.definition(item_id)
+	_add_effect(picked_position, "+%d %s" % [quantity, definition.display_name.to_upper()], definition.visual_color)
+	message_requested.emit("PICKED UP %s x%d" % [definition.display_name.to_upper(), quantity])
 	state_changed.emit()
 	queue_redraw()
-	return true
+	return 1
+
+
+func _nearest_pickup_candidate() -> Dictionary:
+	var nearest_eligible: Dictionary = {}
+	var nearest_blocked: Dictionary = {}
+	for item in logistics.all_items():
+		var item_position := logistics.item_world_position(item, float(CELL)) if belts.has(item.cell) else Vector2(item.cell) * CELL + Vector2.ONE * CELL * 0.5
+		var distance := engineer_position.distance_to(item_position)
+		if distance <= GameBalance.PICKUP_RADIUS:
+			var candidate := {
+				"kind": "belt",
+				"id": int(item.id),
+				"item_id": str(item.resource),
+				"quantity": int(item.quantity),
+				"position": item_position,
+				"distance": distance,
+				"eligible": inventory.can_add(str(item.resource), int(item.quantity)),
+			}
+			if bool(candidate.eligible):
+				nearest_eligible = _closer_pickup(nearest_eligible, candidate)
+			else:
+				nearest_blocked = _closer_pickup(nearest_blocked, candidate)
+	for pickup in loose_pickups:
+		var distance := engineer_position.distance_to(Vector2(pickup.position))
+		if distance <= GameBalance.PICKUP_RADIUS:
+			var candidate := {
+				"kind": "loose",
+				"id": int(pickup.id),
+				"item_id": str(pickup.item_id),
+				"quantity": int(pickup.quantity),
+				"position": Vector2(pickup.position),
+				"distance": distance,
+				"eligible": inventory.can_add(str(pickup.item_id), int(pickup.quantity)),
+			}
+			if bool(candidate.eligible):
+				nearest_eligible = _closer_pickup(nearest_eligible, candidate)
+			else:
+				nearest_blocked = _closer_pickup(nearest_blocked, candidate)
+	return nearest_eligible if not nearest_eligible.is_empty() else nearest_blocked
+
+
+func _closer_pickup(current: Dictionary, candidate: Dictionary) -> Dictionary:
+	if current.is_empty() or float(candidate.distance) < float(current.distance):
+		return candidate
+	if is_equal_approx(float(candidate.distance), float(current.distance)):
+		var candidate_key := "%s:%010d" % [str(candidate.kind), int(candidate.id)]
+		var current_key := "%s:%010d" % [str(current.kind), int(current.id)]
+		if candidate_key < current_key:
+			return candidate
+	return current
 
 
 func insert_selected_item_on_belt(cell: Vector2i, preferred_lane := -1) -> bool:
@@ -1069,10 +1193,8 @@ func refill_stamina() -> void:
 	state_changed.emit()
 
 
-func _update_camera() -> void:
-	var map_size := Vector2(MAP_CELLS.x * CELL, MAP_CELLS.y * CELL)
-	var desired := VIEW_SIZE * 0.5 - engineer_position
-	position = Vector2(clampf(desired.x, VIEW_SIZE.x - map_size.x, 0.0), clampf(desired.y, VIEW_SIZE.y - map_size.y, 0.0))
+func _update_camera(delta := 0.0, snap_to_target := false) -> void:
+	camera_controller.apply_to(self, engineer_position, delta, snap_to_target)
 
 
 func _add_effect(world_position: Vector2, text_value: String, color: Color) -> void:
@@ -1093,9 +1215,9 @@ func context_text() -> String:
 		return "BUILD: %s  |  %s  |  LMB place  R rotate  RMB cancel" % [build_kind.replace("_", " ").to_upper(), source]
 	if engineer_position.distance_to(_cell_center(COMMAND_CELL)) <= 86.0:
 		return "E  COMMAND CENTER — ENGINEERING PROJECTS / WEAPON WORKSHOP"
-	var nearby_item := logistics.closest_item(engineer_position, GameBalance.BELT_PICKUP_RADIUS, float(CELL))
-	if not nearby_item.is_empty():
-		return "E  PICK UP %s x%d FROM BELT" % [ItemCatalog.definition(str(nearby_item.resource)).display_name.to_upper(), int(nearby_item.quantity)]
+	var nearby_pickup := _nearest_pickup_candidate()
+	if not nearby_pickup.is_empty():
+		return "HOLD E  PICK UP %s x%d" % [ItemCatalog.definition(str(nearby_pickup.item_id)).display_name.to_upper(), int(nearby_pickup.quantity)]
 	var front_weapon_index := _nearest_front_weapon_index()
 	if front_weapon_index >= 0:
 		var snapshot := defense_front_snapshot(front_weapon_index)
@@ -1113,7 +1235,7 @@ func context_text() -> String:
 		return "E  DIG MOUNTAIN"
 	if exposed_veins.has(_nearest_exposed_vein()):
 		return "E  GATHER ORE"
-	return "WASD move  •  E interact  •  V logistics debug  •  TAB command view"
+	return "WASD move  •  WHEEL zoom  •  MMB pan  •  E interact  •  V logistics debug  •  TAB command view"
 
 
 func _draw() -> void:
@@ -1144,6 +1266,13 @@ func _draw() -> void:
 			"large_rock": draw_texture_rect(BIG_ROCK_TEXTURE, Rect2(center - Vector2(48, 23), Vector2(96, 46)), false)
 			"surface_ore": draw_texture_rect_region(ORE_TEXTURE, Rect2(center - Vector2(16, 16), Vector2(32, 32)), Rect2(0, 0, 16, 16))
 			"crate": draw_texture_rect_region(CRATE_TEXTURE, Rect2(center - Vector2(20, 20), Vector2(40, 40)), Rect2(0, 0, 32, 32))
+	for pickup in loose_pickups:
+		var definition := ItemCatalog.definition(str(pickup.item_id))
+		var pickup_position := Vector2(pickup.position)
+		draw_circle(pickup_position, 7.0, Color(definition.visual_color, 0.28))
+		draw_circle(pickup_position, 4.0, definition.visual_color)
+		if int(pickup.quantity) > 1:
+			draw_string(ThemeDB.fallback_font, pickup_position + Vector2(5, -5), str(pickup.quantity), HORIZONTAL_ALIGNMENT_LEFT, 30, 9, Color.WHITE)
 	_draw_belt_network()
 	for structure in structures:
 		if not bool(structure.active): continue
