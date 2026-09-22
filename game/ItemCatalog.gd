@@ -38,6 +38,16 @@ static func all_ids() -> Array[String]:
 	return result
 
 
+static func item_id_for_placement(placement_id: String) -> String:
+	_ensure_definitions()
+	for item_id_value in _definitions:
+		var item_id := str(item_id_value)
+		var item: ItemDefinition = _definitions[item_id]
+		if item.placeable and item.placement_definition == placement_id:
+			return item_id
+	return ""
+
+
 static func category_name(category: ItemDefinition.Category) -> String:
 	return ItemDefinition.Category.keys()[int(category)].capitalize()
 
@@ -49,7 +59,7 @@ static func _ensure_definitions() -> void:
 	_register(STONE, "Stone", ItemDefinition.Category.RESOURCE, 99, true, Color("#c1b8aa"), false, "", "Common construction stone.")
 	_register(ORE, "Ore", ItemDefinition.Category.RESOURCE, 99, true, Color("#72d6a0"), false, "", "Metal-bearing ore used by research and factories.")
 	_register(ADVANCED_RESOURCE, "Energy Crystal", ItemDefinition.Category.COMPONENT, 20, true, Color("#c58cff"), false, "", "A rare component suitable for guidance research.")
-	_register(MG_AMMO, "MG Ammo Crate", ItemDefinition.Category.AMMUNITION, 500, true, Color("#ffd166"), false, "", "Ammunition for the Basic Machine Gun.")
+	_register(MG_AMMO, "MG Ammo Crate", ItemDefinition.Category.AMMUNITION, 500, true, Color("#ffd166"), false, "", "Ammunition for the Basic Machine Gun.", GameBalance.AMMO_FACTORY_OUTPUT)
 	_register(MISSILE, "Missile", ItemDefinition.Category.AMMUNITION, 12, true, Color("#79d8ff"), false, "", "A missile round; launchers are fabricated separately.")
 	_register(BELT, "Conveyor Belt", ItemDefinition.Category.BUILDING, 100, false, Color("#8db7c9"), true, "belt", "A placeable standard two-lane conveyor segment.")
 	_register(SPLITTER, "Splitter", ItemDefinition.Category.BUILDING, 20, false, Color("#67a7c8"), true, "splitter", "A configurable two-output belt junction.")
@@ -60,5 +70,5 @@ static func _ensure_definitions() -> void:
 	_register(MISSILE_LAUNCHER, "Missile Launcher", ItemDefinition.Category.WEAPON, 5, false, Color("#50b8d8"), true, "missile_launcher", "A fabricated launcher that links to the shared defense-front weapon.")
 
 
-static func _register(item_id: String, item_name: String, item_category: ItemDefinition.Category, stack_limit: int, transportable: bool, color: Color, placeable: bool, placement_id: String, description: String) -> void:
-	_definitions[item_id] = ItemDefinition.new().setup(item_id, item_name, item_category, stack_limit, transportable, color, placeable, placement_id, description)
+static func _register(item_id: String, item_name: String, item_category: ItemDefinition.Category, stack_limit: int, transportable: bool, color: Color, placeable: bool, placement_id: String, description: String, transport_quantity := 1) -> void:
+	_definitions[item_id] = ItemDefinition.new().setup(item_id, item_name, item_category, stack_limit, transportable, color, placeable, placement_id, description, transport_quantity)

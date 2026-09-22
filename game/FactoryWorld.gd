@@ -365,6 +365,8 @@ func select_inventory_item(item_id: String) -> void:
 		build_kind = definition.placement_definition
 		build_item_id = item_id
 		message_requested.emit("PLACE %s  •  LMB PLACE  R ROTATE  RMB CANCEL" % definition.display_name.to_upper())
+	elif definition.transportable:
+		message_requested.emit("SELECTED %s  •  LMB A NEARBY BELT TO INSERT" % definition.display_name.to_upper())
 	else:
 		message_requested.emit("SELECTED %s" % definition.display_name.to_upper())
 	queue_redraw()
@@ -460,9 +462,14 @@ func _unhandled_input(event: InputEvent) -> void:
 			preview_cell = _world_to_cell(to_local(event.position))
 			_place_selected_building()
 			get_viewport().set_input_as_handled()
+		elif event.button_index == MOUSE_BUTTON_LEFT and not selected_item_id.is_empty():
+			var insertion_cell := _world_to_cell(to_local(event.position))
+			if belts.has(insertion_cell):
+				insert_selected_item_on_belt(insertion_cell)
+				get_viewport().set_input_as_handled()
 		elif event.button_index == MOUSE_BUTTON_RIGHT:
 			if not cancel_build():
-				_remove_belt_at(_world_to_cell(to_local(event.position)))
+				dismantle_at(_world_to_cell(to_local(event.position)))
 			get_viewport().set_input_as_handled()
 
 
@@ -607,15 +614,16 @@ func _place_selected_building() -> bool:
 		message_requested.emit("NOT ENOUGH STAMINA")
 		return false
 	var placement_succeeded := true
+	var source_item_id := build_item_id if not build_item_id.is_empty() else ItemCatalog.item_id_for_placement(build_kind)
 	if build_kind == "missile_launcher":
 		var missile_index := 1
 		defense_weapons[missile_index].unlocked = true
 		defense_weapons[missile_index].queue_redraw()
 		weapon_placed.emit(RunInventory.MISSILE_LAUNCHER, missile_index)
 	elif build_kind == "belt":
-		placement_succeeded = logistics.add_belt(preview_cell, build_rotation)
+		placement_succeeded = logistics.add_belt(preview_cell, build_rotation, "standard", source_item_id)
 	elif build_kind == "splitter":
-		placement_succeeded = logistics.add_splitter(preview_cell, build_rotation)
+		placement_succeeded = logistics.add_splitter(preview_cell, build_rotation, source_item_id)
 	else:
 		var deposit_remaining := int(vein_amounts.get(preview_cell, 0)) if build_kind == "drill" else 0
 		var base_production_time := GameBalance.DRILL_INTERVAL
@@ -624,6 +632,7 @@ func _place_selected_building() -> bool:
 		structures.append({
 			"id": next_structure_id,
 			"kind": build_kind,
+			"source_item_id": source_item_id,
 			"cell": preview_cell,
 			"rotation": build_rotation,
 			"timer": 0.0,
@@ -712,21 +721,111 @@ func pickup_nearby_transport_item() -> bool:
 	return true
 
 
-func _remove_belt_at(cell: Vector2i) -> void:
+func insert_selected_item_on_belt(cell: Vector2i, preferred_lane := -1) -> bool:
+	if selected_item_id.is_empty() or not belts.has(cell):
+		return false
+	if engineer_position.distance_to(_cell_center(cell)) > GameBalance.BELT_PICKUP_RADIUS:
+		message_requested.emit("MOVE CLOSER TO INSERT ITEM")
+		return false
+	var definition := ItemCatalog.definition(selected_item_id)
+	if not definition.transportable:
+		message_requested.emit("%s CANNOT TRAVEL ON BELTS" % definition.display_name.to_upper())
+		return false
+	var quantity := definition.transport_quantity
+	if not inventory.can_remove(selected_item_id, quantity):
+		message_requested.emit("NOT ENOUGH %s" % definition.display_name.to_upper())
+		return false
+	if not logistics.can_insert_item(cell, selected_item_id, quantity, preferred_lane):
+		message_requested.emit("BELT INSERTION BLOCKED")
+		return false
+	var packet := logistics.try_insert_item(cell, selected_item_id, quantity, preferred_lane)
+	if packet.is_empty():
+		message_requested.emit("BELT INSERTION BLOCKED")
+		return false
+	if not inventory.remove(selected_item_id, quantity):
+		if logistics.take_item(int(packet.id)).is_empty():
+			push_error("Atomic manual Belt insertion rollback failed")
+		message_requested.emit("INSERTION CANCELLED — INVENTORY UNCHANGED")
+		return false
+	_add_effect(logistics.item_world_position(packet, float(CELL)), "-%d %s" % [quantity, definition.display_name.to_upper()], definition.visual_color)
+	message_requested.emit("INSERTED %s x%d ON BELT" % [definition.display_name.to_upper(), quantity])
+	state_changed.emit()
+	queue_redraw()
+	return true
+
+
+func dismantle_at(cell: Vector2i) -> bool:
 	if belts.has(cell):
-		if not logistics.remove_belt(cell):
+		if not logistics.belt_empty(cell):
 			message_requested.emit("BELT OCCUPIED — REMOVE ITEMS FIRST")
-			return
-		message_requested.emit("BELT REMOVED")
-		state_changed.emit()
-		queue_redraw()
-	elif splitters.has(cell):
-		if not logistics.remove_splitter(cell):
+			return false
+		return _dismantle_transport_structure(cell, false)
+	if splitters.has(cell):
+		var buffers: Array = splitters[cell].buffers
+		if not Array(buffers[0]).is_empty() or not Array(buffers[1]).is_empty():
 			message_requested.emit("SPLITTER OCCUPIED — REMOVE ITEMS FIRST")
-			return
-		message_requested.emit("SPLITTER REMOVED")
-		state_changed.emit()
-		queue_redraw()
+			return false
+		return _dismantle_transport_structure(cell, true)
+	var structure = _find_structure_at(cell)
+	if structure == null:
+		message_requested.emit("NOTHING PLAYER-BUILT TO DISMANTLE")
+		return false
+	if not _structure_empty(structure):
+		message_requested.emit("DISMANTLE BLOCKED — MACHINE NOT EMPTY")
+		return false
+	var source_item_id := str(structure.get("source_item_id", ""))
+	if source_item_id.is_empty() or not ItemCatalog.has(source_item_id):
+		message_requested.emit("DISMANTLE BLOCKED — SOURCE ITEM UNKNOWN")
+		return false
+	if not inventory.can_add(source_item_id, 1):
+		message_requested.emit("INVENTORY FULL — STRUCTURE UNCHANGED")
+		return false
+	structure.active = false
+	if not inventory.add_exact(source_item_id, 1):
+		structure.active = true
+		push_error("Atomic structure dismantle rollback used")
+		return false
+	if str(structure.kind) == "storage":
+		_recalculate_capacities()
+	_finish_dismantle(cell, source_item_id)
+	return true
+
+
+func _dismantle_transport_structure(cell: Vector2i, is_splitter: bool) -> bool:
+	var transport: Dictionary = splitters[cell] if is_splitter else belts[cell]
+	var source_item_id := str(transport.get("source_item_id", ""))
+	if source_item_id.is_empty() or not ItemCatalog.has(source_item_id):
+		message_requested.emit("DISMANTLE BLOCKED — SOURCE ITEM UNKNOWN")
+		return false
+	if not inventory.can_add(source_item_id, 1):
+		message_requested.emit("INVENTORY FULL — STRUCTURE UNCHANGED")
+		return false
+	var removed := logistics.remove_splitter(cell) if is_splitter else logistics.remove_belt(cell)
+	if not removed:
+		message_requested.emit("DISMANTLE BLOCKED — STRUCTURE NOT EMPTY")
+		return false
+	if not inventory.add_exact(source_item_id, 1):
+		var restored := logistics.restore_splitter(transport) if is_splitter else logistics.restore_belt(transport)
+		if not restored:
+			push_error("Atomic transport dismantle rollback failed")
+		return false
+	_finish_dismantle(cell, source_item_id)
+	return true
+
+
+func _structure_empty(structure: Dictionary) -> bool:
+	for quantity in Dictionary(structure.get("input_buffer", {})).values():
+		if int(quantity) > 0:
+			return false
+	return Array(structure.get("output_buffer", [])).is_empty() and Array(structure.get("storage_inventory", [])).is_empty()
+
+
+func _finish_dismantle(cell: Vector2i, source_item_id: String) -> void:
+	var definition := ItemCatalog.definition(source_item_id)
+	_add_effect(_cell_center(cell), "+1 %s" % definition.display_name.to_upper(), definition.visual_color)
+	message_requested.emit("%s RETURNED TO INVENTORY" % definition.display_name.to_upper())
+	state_changed.emit()
+	queue_redraw()
 
 
 func _find_structure_at(cell: Vector2i):

@@ -27,7 +27,7 @@ func reset() -> void:
 	next_item_id = 1
 
 
-func add_belt(cell: Vector2i, direction: int, belt_type := "standard") -> bool:
+func add_belt(cell: Vector2i, direction: int, belt_type := "standard", source_item_id := "") -> bool:
 	if belts.has(cell) or splitters.has(cell) or not belt_types.has(belt_type):
 		return false
 	belts[cell] = {
@@ -38,6 +38,7 @@ func add_belt(cell: Vector2i, direction: int, belt_type := "standard") -> bool:
 		"topology": _straight_topology(posmod(direction, 4)),
 		"primary_input": posmod(direction, 4),
 		"incoming": [],
+		"source_item_id": source_item_id,
 	}
 	_update_topology_near(cell)
 	return true
@@ -47,6 +48,15 @@ func remove_belt(cell: Vector2i) -> bool:
 	if not belts.has(cell) or not belt_empty(cell):
 		return false
 	belts.erase(cell)
+	_update_topology_near(cell)
+	return true
+
+
+func restore_belt(belt_state: Dictionary) -> bool:
+	var cell: Vector2i = belt_state.get("cell", Vector2i(-1, -1))
+	if belts.has(cell) or splitters.has(cell):
+		return false
+	belts[cell] = belt_state
 	_update_topology_near(cell)
 	return true
 
@@ -66,7 +76,7 @@ func belt_empty(cell: Vector2i) -> bool:
 	return Array(lanes[0]).is_empty() and Array(lanes[1]).is_empty()
 
 
-func add_splitter(cell: Vector2i, direction: int) -> bool:
+func add_splitter(cell: Vector2i, direction: int, source_item_id := "") -> bool:
 	if belts.has(cell) or splitters.has(cell):
 		return false
 	splitters[cell] = {
@@ -78,6 +88,7 @@ func add_splitter(cell: Vector2i, direction: int) -> bool:
 		"filter_resource": "",
 		"filter_mode": FILTER_STRICT,
 		"config_index": 0,
+		"source_item_id": source_item_id,
 	}
 	_update_topology_near(cell)
 	return true
@@ -100,6 +111,15 @@ func remove_splitter(cell: Vector2i) -> bool:
 	if not Array(buffers[0]).is_empty() or not Array(buffers[1]).is_empty():
 		return false
 	splitters.erase(cell)
+	_update_topology_near(cell)
+	return true
+
+
+func restore_splitter(splitter_state: Dictionary) -> bool:
+	var cell: Vector2i = splitter_state.get("cell", Vector2i(-1, -1))
+	if belts.has(cell) or splitters.has(cell):
+		return false
+	splitters[cell] = splitter_state
 	_update_topology_near(cell)
 	return true
 
@@ -153,6 +173,24 @@ func try_insert_from_endpoint(cell: Vector2i, resource_id: String, quantity: int
 			spawn_item(cell, lane, resource_id, quantity, 0.0, entry_direction)
 			return lane
 	return -1
+
+
+func can_insert_item(cell: Vector2i, item_id: String, quantity: int, preferred_lane := -1) -> bool:
+	if not belts.has(cell) or quantity <= 0 or not ItemCatalog.has(item_id) or not ItemCatalog.definition(item_id).transportable:
+		return false
+	for lane in _manual_insertion_lanes(preferred_lane):
+		if _can_accept_belt(cell, lane, 0.0):
+			return true
+	return false
+
+
+func try_insert_item(cell: Vector2i, item_id: String, quantity: int, preferred_lane := -1) -> Dictionary:
+	if not can_insert_item(cell, item_id, quantity, preferred_lane):
+		return {}
+	for lane in _manual_insertion_lanes(preferred_lane):
+		if _can_accept_belt(cell, lane, 0.0):
+			return spawn_item(cell, lane, item_id, quantity, 0.0, int(belts[cell].primary_input))
+	return {}
 
 
 func all_items() -> Array[Dictionary]:
@@ -457,6 +495,12 @@ func _make_item(resource_id: String, quantity: int, cell: Vector2i, lane: int, p
 	}
 	next_item_id += 1
 	return item
+
+
+func _manual_insertion_lanes(preferred_lane: int) -> Array[int]:
+	if preferred_lane in [0, 1]:
+		return [preferred_lane, 1 - preferred_lane]
+	return [0, 1]
 
 
 func _sort_lane(items: Array) -> void:

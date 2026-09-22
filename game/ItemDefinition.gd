@@ -11,6 +11,7 @@ enum Category { RESOURCE, BUILDING, WEAPON, AMMUNITION, COMPONENT, UTILITY }
 @export var placeable := false
 @export var placement_definition := ""
 @export var transportable := false
+@export var transport_quantity := 1
 @export_multiline var description := ""
 @export var visual_color := Color.WHITE
 @export var visual_scale := Vector2.ONE
@@ -26,13 +27,15 @@ func setup(
 	color: Color,
 	is_placeable := false,
 	placement_id := "",
-	details := ""
+	details := "",
+	packet_quantity := 1
 ) -> ItemDefinition:
 	stable_id = item_id
 	display_name = item_name
 	category = item_category
 	max_stack = maxi(1, stack_limit)
 	transportable = is_transportable
+	transport_quantity = maxi(1, packet_quantity)
 	visual_color = color
 	placeable = is_placeable
 	placement_definition = placement_id
