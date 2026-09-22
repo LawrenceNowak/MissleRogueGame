@@ -689,7 +689,7 @@ func _consume_recipe(recipe: Dictionary) -> void:
 
 
 func pickup_nearby_transport_item() -> bool:
-	var item := logistics.closest_item(engineer_position, 54.0, float(CELL))
+	var item := logistics.closest_item(engineer_position, GameBalance.BELT_PICKUP_RADIUS, float(CELL))
 	if item.is_empty():
 		return false
 	var item_id := str(item.resource)
@@ -701,7 +701,9 @@ func pickup_nearby_transport_item() -> bool:
 	if taken.is_empty():
 		return true
 	if not inventory.add_exact(item_id, quantity):
-		push_error("Atomic belt pickup invariant failed after capacity check")
+		if not logistics.restore_taken_item(taken):
+			push_error("Atomic belt pickup rollback failed")
+		message_requested.emit("PICKUP CANCELLED — BELT ITEM RESTORED")
 		return true
 	_add_effect(logistics.item_world_position(item, float(CELL)), "+%d %s" % [quantity, ItemCatalog.definition(item_id).display_name.to_upper()], ItemCatalog.definition(item_id).visual_color)
 	message_requested.emit("PICKED UP %s FROM BELT" % ItemCatalog.definition(item_id).display_name.to_upper())
@@ -992,7 +994,7 @@ func context_text() -> String:
 		return "BUILD: %s  |  %s  |  LMB place  R rotate  RMB cancel" % [build_kind.replace("_", " ").to_upper(), source]
 	if engineer_position.distance_to(_cell_center(COMMAND_CELL)) <= 86.0:
 		return "E  COMMAND CENTER — ENGINEERING PROJECTS / WEAPON WORKSHOP"
-	var nearby_item := logistics.closest_item(engineer_position, 54.0, float(CELL))
+	var nearby_item := logistics.closest_item(engineer_position, GameBalance.BELT_PICKUP_RADIUS, float(CELL))
 	if not nearby_item.is_empty():
 		return "E  PICK UP %s x%d FROM BELT" % [ItemCatalog.definition(str(nearby_item.resource)).display_name.to_upper(), int(nearby_item.quantity)]
 	var front_weapon_index := _nearest_front_weapon_index()

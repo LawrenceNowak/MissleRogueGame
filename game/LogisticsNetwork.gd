@@ -190,6 +190,7 @@ func take_item(item_id: int) -> Dictionary:
 			for index in items.size():
 				if int(items[index].id) == item_id:
 					var item: Dictionary = items[index]
+					item["_pickup_origin"] = {"kind": "belt", "cell": cell, "lane": lane, "index": index}
 					items.remove_at(index)
 					return item
 	for cell in _sorted_cells(splitters.keys()):
@@ -199,9 +200,34 @@ func take_item(item_id: int) -> Dictionary:
 			for index in items.size():
 				if int(items[index].id) == item_id:
 					var item: Dictionary = items[index]
+					item["_pickup_origin"] = {"kind": "splitter", "cell": cell, "lane": lane, "index": index}
 					items.remove_at(index)
 					return item
 	return {}
+
+
+func restore_taken_item(item: Dictionary) -> bool:
+	var origin: Dictionary = item.get("_pickup_origin", {})
+	if origin.is_empty():
+		return false
+	var cell: Vector2i = origin.cell
+	var lane := int(origin.lane)
+	var items: Array
+	if str(origin.kind) == "belt" and belts.has(cell):
+		items = belts[cell].lanes[lane]
+	elif str(origin.kind) == "splitter" and splitters.has(cell):
+		items = splitters[cell].buffers[lane]
+	else:
+		return false
+	if items.any(func(existing): return int(existing.id) == int(item.id)):
+		return false
+	item.erase("_pickup_origin")
+	if str(origin.kind) == "belt":
+		items.append(item)
+		_sort_lane(items)
+	else:
+		items.insert(clampi(int(origin.index), 0, items.size()), item)
+	return true
 
 
 func item_count() -> int:
