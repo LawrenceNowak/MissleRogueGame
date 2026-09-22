@@ -712,6 +712,7 @@ func _begin_preparation(_first_preparation: bool = false) -> void:
 	if is_instance_valid(factory_world):
 		factory_world.begin_preparation()
 		factory_world.set_factory_view(true)
+		factory_world.select_inventory_item(quickbar.selected_item_id())
 	hud.visible = false
 	factory_hud.visible = true
 	factory_inventory_ui.set_factory_visible(true)

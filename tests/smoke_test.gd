@@ -255,7 +255,10 @@ func _run() -> void:
 
 	game._start_run()
 	await process_frame
-	check(game.phase == game.Phase.PREPARATION and game.factory_world.structures.is_empty() and game.factory_world.logistics.item_count() == 0 and game.inventory.amount(RunInventory.GATLING_AMMO) == 1000, "New Run must reset Factory construction, physical transport items, ammunition, and phase")
+	check(game.phase == game.Phase.PREPARATION, "New Run must return to preparation")
+	check(game.factory_world.structures.is_empty(), "New Run must clear Factory construction")
+	check(game.factory_world.logistics.item_count() == 0, "New Run must clear physical transport items")
+	check(game.inventory.amount(RunInventory.GATLING_AMMO) == GameBalance.STARTING_GATLING_AMMO, "New Run must reset Basic MG ammunition")
 	check(game.research.has_blueprint(RunInventory.MISSILE_LAUNCHER) and game.inventory.amount(RunInventory.MISSILE_LAUNCHER) == 0 and not game.weapons[1].unlocked, "New Run must retain blueprint knowledge but reset fabricated and placed launchers")
 	check(game.factory_world.explored_cells.size() == initial_fog_count, "New Run must reset fog to the starting reveal")
 	for cycle_wave in range(1, 4):

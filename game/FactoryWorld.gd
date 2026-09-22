@@ -606,21 +606,16 @@ func _place_selected_building() -> bool:
 	if stamina < stamina_cost:
 		message_requested.emit("NOT ENOUGH STAMINA")
 		return false
-	if not _spend_stamina(stamina_cost, "CONSTRUCTION"):
-		return false
-	if not build_item_id.is_empty():
-		inventory.remove(build_item_id, 1)
-	else:
-		_consume_recipe(recipe)
+	var placement_succeeded := true
 	if build_kind == "missile_launcher":
 		var missile_index := 1
 		defense_weapons[missile_index].unlocked = true
 		defense_weapons[missile_index].queue_redraw()
 		weapon_placed.emit(RunInventory.MISSILE_LAUNCHER, missile_index)
 	elif build_kind == "belt":
-		logistics.add_belt(preview_cell, build_rotation)
+		placement_succeeded = logistics.add_belt(preview_cell, build_rotation)
 	elif build_kind == "splitter":
-		logistics.add_splitter(preview_cell, build_rotation)
+		placement_succeeded = logistics.add_splitter(preview_cell, build_rotation)
 	else:
 		var deposit_remaining := int(vein_amounts.get(preview_cell, 0)) if build_kind == "drill" else 0
 		var base_production_time := GameBalance.DRILL_INTERVAL
@@ -652,6 +647,14 @@ func _place_selected_building() -> bool:
 		})
 		next_structure_id += 1
 		if build_kind == "storage": _recalculate_capacities()
+	if not placement_succeeded:
+		message_requested.emit("PLACEMENT FAILED — NOTHING CONSUMED")
+		return false
+	if not build_item_id.is_empty():
+		inventory.remove(build_item_id, 1)
+	else:
+		_consume_recipe(recipe)
+	_spend_stamina(stamina_cost, "CONSTRUCTION")
 	_add_effect(_cell_center(preview_cell), "BUILT", Color("#72d6a0"))
 	message_requested.emit("%s BUILT" % build_kind.replace("_", " ").to_upper())
 	state_changed.emit()
@@ -662,8 +665,10 @@ func _place_selected_building() -> bool:
 func _can_build(kind_id: String, cell: Vector2i) -> bool:
 	if transition_locked or not _cell_in_bounds(cell) or not explored_cells.has(cell):
 		return false
+	if not build_item_id.is_empty() and not inventory.can_remove(build_item_id, 1):
+		return false
 	if kind_id == "missile_launcher":
-		return build_item_id == RunInventory.MISSILE_LAUNCHER and inventory.can_remove(build_item_id, 1) and defense_weapons.size() > 1 and not bool(defense_weapons[1].unlocked) and cell == defense_front_cell_for_weapon(1)
+		return build_item_id == RunInventory.MISSILE_LAUNCHER and defense_weapons.size() > 1 and not bool(defense_weapons[1].unlocked) and cell == defense_front_cell_for_weapon(1)
 	if mountain_cells.has(cell) or _active_object_at(cell) or cell.distance_to(COMMAND_CELL) < 3.0 or _front_cell_occupied(cell):
 		return false
 	if logistics.cell_occupied(cell) or _find_structure_at(cell) != null:
