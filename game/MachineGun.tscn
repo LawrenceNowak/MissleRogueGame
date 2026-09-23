@@ -1,0 +1,22 @@
+[gd_scene load_steps=4 format=3]
+
+[ext_resource type="Script" path="res://game/Weapon.gd" id="1_weapon"]
+[ext_resource type="Texture2D" path="res://assets/editor_placeholders/weapon_base.svg" id="2_base"]
+[ext_resource type="Texture2D" path="res://assets/editor_placeholders/machine_gun_turret.svg" id="3_turret"]
+
+[node name="MachineGun" type="Node2D"]
+script = ExtResource("1_weapon")
+kind = 1
+
+[node name="BaseSprite" type="Sprite2D" parent="."]
+texture = ExtResource("2_base")
+
+[node name="TurretPivot" type="Node2D" parent="."]
+
+[node name="TurretSprite" type="Sprite2D" parent="TurretPivot"]
+texture = ExtResource("3_turret")
+centered = false
+position = Vector2(0, -5)
+
+[node name="MuzzlePoint" type="Marker2D" parent="TurretPivot"]
+position = Vector2(30, 0)

@@ -1,6 +1,94 @@
-[gd_scene load_steps=2 format=3]
+[gd_scene format=3 uid="uid://cmfsod32e7p6v"]
 
-[ext_resource type="Script" path="res://game/Main.gd" id="1_main"]
+[ext_resource type="Script" uid="uid://bmb1tm60xwx0n" path="res://game/Main.gd" id="1_main"]
+[ext_resource type="Texture2D" uid="uid://d35tmd8qmpn48" path="res://assets/editor_placeholders/battlefield_background.svg" id="2_background"]
+[ext_resource type="Texture2D" uid="uid://nwaejjojpt8k" path="res://assets/editor_placeholders/battlefield_ground.svg" id="3_ground"]
+[ext_resource type="PackedScene" path="res://game/City.tscn" id="4_city"]
+[ext_resource type="PackedScene" path="res://game/MachineGun.tscn" id="5_mg"]
+[ext_resource type="Texture2D" uid="uid://dp3mcq82o56cw" path="res://assets/weapons/machine_gun/machine_gun_base.png" id="6_6t0ec"]
+[ext_resource type="PackedScene" path="res://game/MissileLauncher.tscn" id="6_missile"]
+[ext_resource type="Texture2D" uid="uid://yrym5l8djrv3" path="res://assets/weapons/machine_gun/machine_gun_turret.png" id="7_v2tjf"]
 
-[node name="Main" type="Node2D"]
+[sub_resource type="RectangleShape2D" id="RectangleShape2D_build_zone"]
+size = Vector2(1216, 128)
+
+[node name="Main" type="Node2D" unique_id=1614857706]
 script = ExtResource("1_main")
+
+[node name="Battlefield" type="Node2D" parent="." unique_id=1992107130]
+
+[node name="Background" type="Sprite2D" parent="Battlefield" unique_id=1641622656]
+z_index = -100
+position = Vector2(640, 360)
+texture = ExtResource("2_background")
+
+[node name="Ground" type="Sprite2D" parent="Battlefield" unique_id=1489816815]
+z_index = -90
+position = Vector2(640, 685)
+texture = ExtResource("3_ground")
+
+[node name="BuildZone" type="Area2D" parent="Battlefield" unique_id=1558792719]
+z_index = -80
+position = Vector2(32, 480)
+
+[node name="ZoneVisual" type="Polygon2D" parent="Battlefield/BuildZone" unique_id=957573249]
+color = Color(0.12, 0.32, 0.38, 0.24)
+polygon = PackedVector2Array(0, 0, 1216, 0, 1216, 128, 0, 128)
+
+[node name="ZoneOutline" type="Line2D" parent="Battlefield/BuildZone" unique_id=347140012]
+points = PackedVector2Array(0, 0, 1216, 0, 1216, 128, 0, 128, 0, 0)
+width = 2.0
+default_color = Color(0.294118, 0.580392, 0.631373, 1)
+
+[node name="CollisionShape2D" type="CollisionShape2D" parent="Battlefield/BuildZone" unique_id=1523345154]
+position = Vector2(608, 64)
+shape = SubResource("RectangleShape2D_build_zone")
+
+[node name="Settlement" type="Node2D" parent="Battlefield" unique_id=425318351]
+
+[node name="Cities" type="Node2D" parent="Battlefield/Settlement" unique_id=265354159]
+
+[node name="City1" parent="Battlefield/Settlement/Cities" unique_id=697930133 instance=ExtResource("4_city")]
+position = Vector2(150, 642)
+
+[node name="City2" parent="Battlefield/Settlement/Cities" unique_id=1164318637 instance=ExtResource("4_city")]
+position = Vector2(370, 642)
+
+[node name="City3" parent="Battlefield/Settlement/Cities" unique_id=51972496 instance=ExtResource("4_city")]
+position = Vector2(590, 642)
+
+[node name="City4" parent="Battlefield/Settlement/Cities" unique_id=1730339195 instance=ExtResource("4_city")]
+position = Vector2(810, 642)
+
+[node name="City5" parent="Battlefield/Settlement/Cities" unique_id=592613764 instance=ExtResource("4_city")]
+position = Vector2(1030, 642)
+
+[node name="StartingWeapons" type="Node2D" parent="Battlefield/Settlement" unique_id=1084368052]
+
+[node name="MachineGun" parent="Battlefield/Settlement/StartingWeapons" unique_id=1386521425 instance=ExtResource("5_mg")]
+position = Vector2(260, 620)
+
+[node name="BaseSprite" parent="Battlefield/Settlement/StartingWeapons/MachineGun" index="0"]
+texture = ExtResource("6_6t0ec")
+
+[node name="TurretPivot" parent="Battlefield/Settlement/StartingWeapons/MachineGun" index="1"]
+position = Vector2(0, -13)
+
+[node name="TurretSprite" parent="Battlefield/Settlement/StartingWeapons/MachineGun/TurretPivot" index="0"]
+z_index = -1
+position = Vector2(-14, -32)
+texture = ExtResource("7_v2tjf")
+
+[node name="MuzzlePoint" parent="Battlefield/Settlement/StartingWeapons/MachineGun/TurretPivot" index="1"]
+position = Vector2(48, 1)
+
+[node name="MissileLauncher" parent="Battlefield/Settlement/StartingWeapons" unique_id=607753391 instance=ExtResource("6_missile")]
+position = Vector2(920, 620)
+
+[editable path="Battlefield/Settlement/Cities/City1"]
+[editable path="Battlefield/Settlement/Cities/City2"]
+[editable path="Battlefield/Settlement/Cities/City3"]
+[editable path="Battlefield/Settlement/Cities/City4"]
+[editable path="Battlefield/Settlement/Cities/City5"]
+[editable path="Battlefield/Settlement/StartingWeapons/MachineGun"]
+[editable path="Battlefield/Settlement/StartingWeapons/MissileLauncher"]

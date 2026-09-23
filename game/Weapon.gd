@@ -3,8 +3,8 @@ extends Node2D
 
 enum Kind { MISSILE, GATLING }
 
-var kind := Kind.MISSILE
-var unlocked := true
+@export var kind := Kind.MISSILE
+@export var unlocked := true
 var selected := false
 var aim_position := Vector2.ZERO
 var cooldown_left := 0.0
@@ -21,12 +21,24 @@ var cooling := 0.0
 var cluster_level := 0
 var ricochet_level := 0
 var upgrade_labels: Array[String] = []
+@onready var base_sprite := get_node_or_null("BaseSprite") as Sprite2D
+@onready var turret_pivot := get_node_or_null("TurretPivot") as Node2D
+@onready var turret_sprite := get_node_or_null("TurretPivot/TurretSprite") as Sprite2D
+@onready var muzzle_point := get_node_or_null("TurretPivot/MuzzlePoint") as Marker2D
 
-func setup(weapon_kind: Kind, world_position: Vector2, is_unlocked: bool = true) -> void:
+func _ready() -> void:
+	reset_stats()
+	_update_authored_visuals()
+
+func initialize(weapon_kind: Kind, is_unlocked: bool = true) -> void:
 	kind = weapon_kind
-	position = world_position
 	unlocked = is_unlocked
 	reset_stats()
+	_update_authored_visuals()
+
+func setup(weapon_kind: Kind, world_position: Vector2, is_unlocked: bool = true) -> void:
+	position = world_position
+	initialize(weapon_kind, is_unlocked)
 
 func reset_stats() -> void:
 	cooldown_left = 0.0
@@ -54,6 +66,7 @@ func _process(delta: float) -> void:
 		heat = maxf(0.0, heat - cooling * delta)
 		if overheated and heat <= GameBalance.GATLING_MAX_HEAT * 0.35:
 			overheated = false
+	_update_authored_visuals()
 	queue_redraw()
 
 func try_fire(rapid_multiplier: float = 1.0) -> Dictionary:
@@ -67,13 +80,24 @@ func try_fire(rapid_multiplier: float = 1.0) -> Dictionary:
 			heat = GameBalance.GATLING_MAX_HEAT
 			overheated = true
 		cooldown_left = cooldown / rapid_multiplier
-		var direction := position.direction_to(aim_position)
+		var direction := muzzle_position().direction_to(aim_position)
 		return {"type": "bullet", "position": muzzle_position(), "velocity": direction * projectile_speed, "damage": damage, "ricochet": ricochet_level}
 	cooldown_left = cooldown / rapid_multiplier
 	return {"type": "missile", "position": muzzle_position(), "target": aim_position, "speed": projectile_speed, "damage": damage, "radius": blast_radius, "cluster": cluster_level}
 
 func muzzle_position() -> Vector2:
-	return position + position.direction_to(aim_position) * (34.0 if kind == Kind.MISSILE else 30.0)
+	if is_instance_valid(muzzle_point):
+		return muzzle_point.global_position
+	return global_position + global_position.direction_to(aim_position) * (34.0 if kind == Kind.MISSILE else 30.0)
+
+func _update_authored_visuals() -> void:
+	if is_instance_valid(base_sprite):
+		base_sprite.visible = unlocked
+	if is_instance_valid(turret_pivot):
+		turret_pivot.visible = unlocked
+		var aim_direction := turret_pivot.global_position.direction_to(aim_position)
+		if aim_direction.length_squared() > 0.0:
+			turret_pivot.global_rotation = aim_direction.angle()
 
 func apply_upgrade(id: String) -> bool:
 	match id:
@@ -116,15 +140,16 @@ func _draw() -> void:
 		draw_arc(Vector2.ZERO, 29.0, 0.0, TAU, 32, Color("ffffff"), 2.0)
 	if dragging:
 		draw_arc(Vector2.ZERO, 36.0, 0.0, TAU, 32, Color("ffe66d"), 3.0)
-	draw_rect(Rect2(-18, -9, 36, 18), Color("263b55"))
-	var local_aim := aim_position - position
+	var local_aim := to_local(aim_position)
 	var direction := local_aim.normalized() if local_aim.length() > 0.1 else Vector2.UP
-	if kind == Kind.MISSILE:
-		draw_line(Vector2.ZERO, direction * 31.0, base_color, 9.0)
-		draw_circle(direction * 31.0, 5.0, Color("e9fbff"))
-	else:
-		var side := direction.orthogonal() * 3.0
-		draw_line(side, direction * 29.0 + side, base_color, 4.0)
-		draw_line(-side, direction * 29.0 - side, base_color, 4.0)
-		if overheated:
-			draw_circle(Vector2(0, 14), 5.0, Color("ff4f64"))
+	if not is_instance_valid(base_sprite) or not is_instance_valid(turret_sprite):
+		draw_rect(Rect2(-18, -9, 36, 18), Color("263b55"))
+		if kind == Kind.MISSILE:
+			draw_line(Vector2.ZERO, direction * 31.0, base_color, 9.0)
+			draw_circle(direction * 31.0, 5.0, Color("e9fbff"))
+		else:
+			var side := direction.orthogonal() * 3.0
+			draw_line(side, direction * 29.0 + side, base_color, 4.0)
+			draw_line(-side, direction * 29.0 - side, base_color, 4.0)
+	if kind == Kind.GATLING and overheated:
+		draw_circle(Vector2(0, 14), 5.0, Color("ff4f64"))

@@ -12,11 +12,18 @@ var shield_max := 0.0
 var destroyed := false
 var selected := false
 var flash := 0.0
+@onready var city_sprite := get_node_or_null("CitySprite") as Sprite2D
+
+func _ready() -> void:
+	_update_visual()
+
+func initialize(index: int) -> void:
+	city_index = index
+	reset_city()
 
 func setup(index: int, world_position: Vector2) -> void:
-	city_index = index
 	position = world_position
-	queue_redraw()
+	initialize(index)
 
 func reset_city(extra_max_hp: float = 0.0) -> void:
 	max_health = GameBalance.CITY_MAX_HP + extra_max_hp
@@ -25,6 +32,7 @@ func reset_city(extra_max_hp: float = 0.0) -> void:
 	shield_max = 0.0
 	destroyed = false
 	selected = false
+	_update_visual()
 	queue_redraw()
 	changed.emit()
 
@@ -42,6 +50,7 @@ func take_damage(amount: float) -> void:
 	if health <= 0.0 and not destroyed:
 		destroyed = true
 		fell.emit(self)
+	_update_visual()
 	queue_redraw()
 	changed.emit()
 
@@ -49,6 +58,7 @@ func repair(amount: float) -> bool:
 	if destroyed or health >= max_health:
 		return false
 	health = minf(max_health, health + amount)
+	_update_visual()
 	queue_redraw()
 	changed.emit()
 	return true
@@ -58,6 +68,7 @@ func install_shield() -> bool:
 		return false
 	shield_max = GameBalance.SHIELD_HP
 	shield_health = shield_max
+	_update_visual()
 	queue_redraw()
 	changed.emit()
 	return true
@@ -65,6 +76,7 @@ func install_shield() -> bool:
 func reinforce(amount: float) -> void:
 	max_health += amount
 	health += amount
+	_update_visual()
 	queue_redraw()
 	changed.emit()
 
@@ -74,7 +86,21 @@ func health_ratio() -> float:
 func _process(delta: float) -> void:
 	if flash > 0.0:
 		flash = maxf(0.0, flash - delta)
+		_update_visual()
 		queue_redraw()
+
+func _update_visual() -> void:
+	if not is_instance_valid(city_sprite):
+		return
+	city_sprite.visible = not destroyed
+	if flash > 0.0:
+		city_sprite.self_modulate = Color.WHITE
+	elif health_ratio() < 0.4:
+		city_sprite.self_modulate = Color("ff667b")
+	elif health_ratio() < 0.75:
+		city_sprite.self_modulate = Color("ffbe62")
+	else:
+		city_sprite.self_modulate = Color.WHITE
 
 func _draw() -> void:
 	if selected:
@@ -86,6 +112,8 @@ func _draw() -> void:
 		draw_rect(Rect2(-31, -8, 62, 12), Color("322f3d"))
 		draw_polygon(PackedVector2Array([Vector2(-26,-8),Vector2(-12,-24),Vector2(-2,-8)]), PackedColorArray([Color("5b4650")]))
 		draw_polygon(PackedVector2Array([Vector2(3,-8),Vector2(15,-18),Vector2(28,-8)]), PackedColorArray([Color("493c48")]))
+		return
+	if is_instance_valid(city_sprite):
 		return
 	var ratio := health_ratio()
 	var color := Color("4de3a4")

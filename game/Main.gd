@@ -5,8 +5,6 @@ signal audio_cue_requested(cue: String)
 enum Phase { MENU, BUILD, DEFENSE, UPGRADE, VICTORY, DEFEAT, PAUSED }
 
 const VIEW_SIZE := Vector2(1280, 720)
-const GROUND_Y := 650.0
-const CITY_X := [150.0, 370.0, 590.0, 810.0, 1030.0]
 const SAVE_PATH := "user://missile_command_save.json"
 
 var phase := Phase.MENU
@@ -37,6 +35,8 @@ var quickbar := QuickbarState.new()
 var research := ResearchState.new()
 var workshop := WeaponWorkshop.new()
 var factory_world: FactoryWorld
+var settlement_root: Node2D
+var build_zone_guide: Area2D
 var settlement_grid := SettlementBuildGrid.new()
 var settlement_buildings: Array[BuildingInstance] = []
 var next_settlement_building_id := 1
@@ -100,6 +100,8 @@ var engineering_ui: EngineeringUI
 func _ready() -> void:
 	process_mode = Node.PROCESS_MODE_ALWAYS
 	randomize()
+	settlement_root = get_node("Battlefield/Settlement") as Node2D
+	build_zone_guide = get_node("Battlefield/BuildZone") as Area2D
 	_load_save()
 	workshop.setup(inventory, research)
 	quickbar.setup(inventory)
@@ -223,13 +225,10 @@ func _unhandled_input(event: InputEvent) -> void:
 func _draw() -> void:
 	if is_instance_valid(factory_world) and factory_world.visible:
 		return
-	draw_rect(Rect2(Vector2.ZERO, VIEW_SIZE), Color("081326"))
 	for index in 36:
 		var x := float((index * 97 + 43) % 1260)
 		var y := float((index * 53 + 19) % 470)
 		draw_circle(Vector2(x, y), 1.2, Color(0.55, 0.78, 1.0, 0.45))
-	draw_rect(Rect2(0, GROUND_Y, 1280, 70), Color("142d36"))
-	draw_line(Vector2(0, GROUND_Y), Vector2(1280, GROUND_Y), Color("3b7683"), 4.0)
 	if phase == Phase.BUILD:
 		_draw_settlement_grid()
 		_draw_build_preview()
@@ -442,29 +441,30 @@ func _start_run() -> void:
 	_begin_wave(1)
 
 func _build_battlefield() -> void:
-	for index in GameBalance.CITY_COUNT:
-		var city := DefenseCity.new()
+	settlement_root.visible = true
+	var city_nodes := get_node("Battlefield/Settlement/Cities").get_children()
+	for index in mini(GameBalance.CITY_COUNT, city_nodes.size()):
+		var city := city_nodes[index] as DefenseCity
 		city.process_mode = Node.PROCESS_MODE_PAUSABLE
-		add_child(city)
-		city.setup(index, Vector2(CITY_X[index], 642.0))
-		city.changed.connect(_refresh_defense_ui)
-		city.fell.connect(_on_city_fell)
+		city.initialize(index)
+		if not city.changed.is_connected(_refresh_defense_ui):
+			city.changed.connect(_refresh_defense_ui)
+		if not city.fell.is_connected(_on_city_fell):
+			city.fell.connect(_on_city_fell)
 		cities.append(city)
-	var basic_mg := PlayerWeapon.new()
+	var basic_mg := get_node("Battlefield/Settlement/StartingWeapons/MachineGun") as PlayerWeapon
 	basic_mg.process_mode = Node.PROCESS_MODE_PAUSABLE
-	add_child(basic_mg)
-	basic_mg.setup(PlayerWeapon.Kind.GATLING, Vector2(260, 620), true)
+	basic_mg.initialize(PlayerWeapon.Kind.GATLING, true)
 	weapons.append(basic_mg)
-	var missile := PlayerWeapon.new()
+	var missile := get_node("Battlefield/Settlement/StartingWeapons/MissileLauncher") as PlayerWeapon
 	missile.process_mode = Node.PROCESS_MODE_PAUSABLE
-	add_child(missile)
-	missile.setup(PlayerWeapon.Kind.MISSILE, Vector2(920, 620), true)
+	missile.initialize(PlayerWeapon.Kind.MISSILE, true)
 	weapons.append(missile)
 	_select_weapon(0)
 	cities[0].selected = true
 
 func _cleanup_run_nodes() -> void:
-	for list in [cities, weapons, enemies, projectiles, pickups, settlement_buildings]:
+	for list in [enemies, projectiles, pickups, settlement_buildings]:
 		for node in list:
 			if is_instance_valid(node): node.queue_free()
 	cities.clear()
@@ -478,6 +478,10 @@ func _cleanup_run_nodes() -> void:
 	dragging_weapon = null
 	next_settlement_building_id = 1
 	_cancel_building_placement()
+	if is_instance_valid(settlement_root):
+		settlement_root.visible = false
+	if is_instance_valid(build_zone_guide):
+		build_zone_guide.visible = false
 	if is_instance_valid(factory_world):
 		factory_world.queue_free()
 	factory_world = null
@@ -493,6 +497,7 @@ func _begin_wave(number: int) -> void:
 		factory_world.begin_defense()
 		factory_world.set_factory_view(false)
 	_set_defense_nodes_visible(true)
+	build_zone_guide.visible = false
 	hud.visible = true
 	factory_hud.visible = false
 	factory_inventory_ui.set_factory_visible(false)
@@ -715,6 +720,7 @@ func _begin_build() -> void:
 	factory_view_active = false
 	_stop_combat_nodes()
 	_set_defense_nodes_visible(true)
+	build_zone_guide.visible = true
 	hud.visible = true
 	factory_hud.visible = false
 	factory_inventory_ui.set_factory_visible(false)
@@ -880,8 +886,6 @@ func _settlement_protected_areas() -> Array[Rect2]:
 
 func _draw_settlement_grid() -> void:
 	var zone := SettlementBuildGrid.BUILD_ZONE
-	draw_rect(zone, Color(0.12, 0.32, 0.38, 0.18))
-	draw_rect(zone, Color("4b94a1"), false, 2.0)
 	var x := zone.position.x
 	while x <= zone.end.x:
 		draw_line(Vector2(x, zone.position.y), Vector2(x, zone.end.y), Color(0.35, 0.66, 0.72, 0.18), 1.0)
@@ -1037,6 +1041,7 @@ func _show_result(won: bool) -> void:
 	defense_panel.visible = false
 	build_panel.visible = false
 	_cancel_building_placement()
+	build_zone_guide.visible = false
 	upgrade_panel.visible = false
 	pause_panel.visible = false
 	result_panel.visible = true
