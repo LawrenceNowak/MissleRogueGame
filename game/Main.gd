@@ -2,7 +2,7 @@ extends Node2D
 
 signal audio_cue_requested(cue: String)
 
-enum Phase { MENU, PREPARATION, DEFENSE, UPGRADE, VICTORY, DEFEAT, PAUSED }
+enum Phase { MENU, BUILD, DEFENSE, UPGRADE, VICTORY, DEFEAT, PAUSED }
 
 const VIEW_SIZE := Vector2(1280, 720)
 const GROUND_Y := 650.0
@@ -26,9 +26,7 @@ var banner_left := 0.0
 var banner_text := ""
 var factory_message_left := 0.0
 var empty_feedback_left := 0.0
-var incoming_timer := 0.0
-var pending_wave_number := 1
-var factory_view_active := true
+var factory_view_active := false
 var charms: Array[String] = []
 var missile_upgrade_cursor := 0
 var gatling_upgrade_cursor := 0
@@ -39,6 +37,13 @@ var quickbar := QuickbarState.new()
 var research := ResearchState.new()
 var workshop := WeaponWorkshop.new()
 var factory_world: FactoryWorld
+var settlement_grid := SettlementBuildGrid.new()
+var settlement_buildings: Array[BuildingInstance] = []
+var next_settlement_building_id := 1
+var selected_building_id := ""
+var build_preview_position := Vector2.ZERO
+var build_preview_valid := false
+var build_preview_reason := ""
 
 var cities: Array[DefenseCity] = []
 var weapons: Array[PlayerWeapon] = []
@@ -72,6 +77,9 @@ var missile_upgrade_button: Button
 var gatling_upgrade_button: Button
 var charm_button: Button
 var next_wave_button: Button
+var build_panel: Panel
+var research_lab_button: Button
+var build_status_label: Label
 var upgrade_panel: Panel
 var upgrade_buttons: Array[Button] = []
 var pause_panel: Panel
@@ -110,26 +118,23 @@ func _process(delta: float) -> void:
 	if banner_left > 0.0:
 		banner_left -= delta
 		banner_label.visible = banner_left > 0.0
-	if factory_message_left > 0.0 and incoming_timer <= 0.0:
+	if factory_message_left > 0.0:
 		factory_message_left = maxf(0.0, factory_message_left - delta)
 		factory_message_label.visible = factory_message_left > 0.0
 	if rapid_fire_left > 0.0:
 		rapid_fire_left = maxf(0.0, rapid_fire_left - delta)
 	if empty_feedback_left > 0.0:
 		empty_feedback_left = maxf(0.0, empty_feedback_left - delta)
-	if incoming_timer > 0.0:
-		incoming_timer = maxf(0.0, incoming_timer - delta)
-		factory_message_label.text = "INCOMING ATTACK  %.1f" % incoming_timer
-		if incoming_timer <= 0.0:
-			_begin_wave(pending_wave_number)
 	if phase == Phase.DEFENSE:
 		_process_spawning(delta)
 		_process_firing()
 		_check_wave_clear()
-	elif phase == Phase.PREPARATION and not factory_view_active:
+	elif phase == Phase.BUILD:
 		if is_instance_valid(dragging_weapon):
 			dragging_weapon.position.x = clampf(get_global_mouse_position().x, 65.0, 1135.0)
 			dragging_weapon.queue_redraw()
+		if not selected_building_id.is_empty():
+			_update_build_preview(get_global_mouse_position())
 	for weapon in weapons:
 		if is_instance_valid(weapon):
 			weapon.aim_position = get_global_mouse_position()
@@ -140,36 +145,16 @@ func _process(delta: float) -> void:
 
 func _input(event: InputEvent) -> void:
 	var key_event := event as InputEventKey
-	if phase == Phase.PREPARATION and factory_view_active:
-		if is_instance_valid(engineering_ui) and engineering_ui.visible and (event.is_action_pressed("pause_game") or (key_event != null and key_event.pressed and key_event.keycode == KEY_ESCAPE)):
-			engineering_ui.close()
-			get_viewport().set_input_as_handled()
-			return
-		if event.is_action_pressed("inventory_toggle"):
-			if not engineering_ui.visible:
-				factory_inventory_ui.toggle_inventory()
-			get_viewport().set_input_as_handled()
-			return
-		if not engineering_ui.visible and not factory_inventory_ui.inventory_panel.visible:
-			for slot_index in QuickbarState.SLOT_COUNT:
-				if event.is_action_pressed("quickbar_slot_%d" % (slot_index + 1)):
-					quickbar.select(slot_index)
-					get_viewport().set_input_as_handled()
-					return
-	if phase == Phase.PREPARATION and factory_view_active and is_instance_valid(factory_world) and not factory_world.build_kind.is_empty() and (event.is_action_pressed("pause_game") or (key_event != null and key_event.pressed and key_event.keycode == KEY_ESCAPE)):
-		factory_world.cancel_build()
+	var escape_pressed := event.is_action_pressed("pause_game") or (key_event != null and key_event.pressed and key_event.keycode == KEY_ESCAPE)
+	if phase == Phase.BUILD and not selected_building_id.is_empty() and escape_pressed:
+		_cancel_building_placement()
 		get_viewport().set_input_as_handled()
 		return
-	if phase == Phase.PREPARATION and key_event != null and key_event.pressed and not key_event.echo and key_event.keycode == KEY_TAB:
-		_toggle_preparation_view()
-		get_viewport().set_input_as_handled()
-		return
-	if event.is_action_pressed("pause_game") or (key_event != null and key_event.pressed and key_event.keycode == KEY_ESCAPE):
+	if escape_pressed:
 		_toggle_pause()
 		get_viewport().set_input_as_handled()
 		return
-	var is_debug_key := OS.is_debug_build() and key_event != null and key_event.pressed and key_event.keycode >= KEY_F1 and key_event.keycode <= KEY_F12
-	if phase == Phase.PAUSED or phase == Phase.MENU or phase == Phase.VICTORY or phase == Phase.DEFEAT or phase == Phase.UPGRADE or (phase == Phase.PREPARATION and factory_view_active and not is_debug_key):
+	if phase == Phase.PAUSED or phase == Phase.MENU or phase == Phase.VICTORY or phase == Phase.DEFEAT or phase == Phase.UPGRADE:
 		return
 	if event.is_action_pressed("select_slot_1") or (key_event != null and key_event.pressed and (key_event.keycode == KEY_1 or key_event.physical_keycode == KEY_1)):
 		_select_weapon(0)
@@ -201,22 +186,37 @@ func _input(event: InputEvent) -> void:
 			KEY_F8:
 				_debug_kill_enemies()
 			KEY_F9:
-				factory_world.reveal_all()
+				if is_instance_valid(factory_world): factory_world.reveal_all()
 			KEY_F10:
-				factory_world.refill_stamina()
-				_factory_message("STAMINA REFILLED")
+				if is_instance_valid(factory_world): factory_world.refill_stamina()
 			KEY_F11:
 				_debug_jump_to_factory()
 			KEY_F12:
-				if phase == Phase.PREPARATION: _request_defense_transition("debug")
+				if phase == Phase.BUILD: _start_next_wave()
 
 func _unhandled_input(event: InputEvent) -> void:
-	if phase != Phase.PREPARATION or factory_view_active or not event is InputEventMouseButton:
+	if phase != Phase.BUILD:
 		return
-	if event.button_index != MOUSE_BUTTON_LEFT:
+	var motion_event := event as InputEventMouseMotion
+	if motion_event != null and not selected_building_id.is_empty():
+		_update_build_preview(motion_event.position)
 		return
-	if event.pressed:
-		_begin_defense_click(event.position)
+	var mouse_event := event as InputEventMouseButton
+	if mouse_event == null:
+		return
+	if mouse_event.button_index == MOUSE_BUTTON_RIGHT and mouse_event.pressed and not selected_building_id.is_empty():
+		_cancel_building_placement()
+		get_viewport().set_input_as_handled()
+		return
+	if mouse_event.button_index != MOUSE_BUTTON_LEFT:
+		return
+	if not selected_building_id.is_empty():
+		if mouse_event.pressed:
+			_try_place_selected_building(mouse_event.position)
+			get_viewport().set_input_as_handled()
+		return
+	if mouse_event.pressed:
+		_begin_defense_click(mouse_event.position)
 	else:
 		_finish_drag()
 
@@ -230,6 +230,9 @@ func _draw() -> void:
 		draw_circle(Vector2(x, y), 1.2, Color(0.55, 0.78, 1.0, 0.45))
 	draw_rect(Rect2(0, GROUND_Y, 1280, 70), Color("142d36"))
 	draw_line(Vector2(0, GROUND_Y), Vector2(1280, GROUND_Y), Color("3b7683"), 4.0)
+	if phase == Phase.BUILD:
+		_draw_settlement_grid()
+		_draw_build_preview()
 	if phase == Phase.DEFENSE:
 		var mouse := get_global_mouse_position()
 		draw_arc(mouse, 12.0, 0.0, TAU, 24, Color(0.55, 0.95, 1.0, 0.9), 2.0)
@@ -332,6 +335,16 @@ func _build_ui() -> void:
 	defense_charms_label = _label(defense_panel, "", 13, Color("c58cff"), Rect2(18, 416, 314, 38))
 	next_wave_button = _button(defense_panel, "START NEXT WAVE", Rect2(18, 460, 314, 38), _start_next_wave)
 
+	build_panel = _panel(layer, Rect2(930, 92, 330, 220), Color(0.035, 0.075, 0.14, 0.96))
+	var build_title := _label(build_panel, "SETTLEMENT CONSTRUCTION", 18, Color("8ef5ff"), Rect2(16, 14, 298, 28))
+	build_title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	var lab_definition := BuildingCatalog.definition(BuildingCatalog.RESEARCH_LAB_ID)
+	research_lab_button = _button(build_panel, "[LAB]  RESEARCH LAB  —  %d" % lab_definition.cost, Rect2(16, 52, 298, 48), func(): _select_building_for_placement(lab_definition.stable_id))
+	var build_description := _label(build_panel, lab_definition.description, 13, Color("9fb4cd"), Rect2(18, 108, 294, 42))
+	build_description.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	build_status_label = _label(build_panel, "Select a building. LMB places; RMB/Esc cancels.", 13, Color("e8f0ff"), Rect2(18, 158, 294, 48))
+	build_status_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+
 	upgrade_panel = _panel(layer, Rect2(270, 176, 740, 365), Color(0.04, 0.065, 0.13, 0.98))
 	var upgrade_title := _label(upgrade_panel, "CHOOSE 1 OF 3", 28, Color("ffe66d"), Rect2(30, 24, 680, 42))
 	upgrade_title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
@@ -423,9 +436,10 @@ func _start_run() -> void:
 	pause_panel.visible = false
 	upgrade_panel.visible = false
 	defense_panel.visible = false
-	hud.visible = false
-	factory_hud.visible = true
-	_begin_preparation(true)
+	build_panel.visible = false
+	hud.visible = true
+	factory_hud.visible = false
+	_begin_wave(1)
 
 func _build_battlefield() -> void:
 	for index in GameBalance.CITY_COUNT:
@@ -444,24 +458,13 @@ func _build_battlefield() -> void:
 	var missile := PlayerWeapon.new()
 	missile.process_mode = Node.PROCESS_MODE_PAUSABLE
 	add_child(missile)
-	missile.setup(PlayerWeapon.Kind.MISSILE, Vector2(920, 620), false)
+	missile.setup(PlayerWeapon.Kind.MISSILE, Vector2(920, 620), true)
 	weapons.append(missile)
-	factory_world = FactoryWorld.new()
-	factory_world.process_mode = Node.PROCESS_MODE_PAUSABLE
-	add_child(factory_world)
-	factory_world.setup(inventory)
-	factory_world.bind_defense_front(weapons, cities)
-	factory_world.wave_requested.connect(_request_defense_transition)
-	factory_world.message_requested.connect(_factory_message)
-	factory_world.credits_found.connect(_on_factory_credits_found)
-	factory_world.weapon_selected.connect(_on_factory_weapon_selected)
-	factory_world.engineering_requested.connect(_open_engineering)
-	factory_world.weapon_placed.connect(_on_factory_weapon_placed)
 	_select_weapon(0)
 	cities[0].selected = true
 
 func _cleanup_run_nodes() -> void:
-	for list in [cities, weapons, enemies, projectiles, pickups]:
+	for list in [cities, weapons, enemies, projectiles, pickups, settlement_buildings]:
 		for node in list:
 			if is_instance_valid(node): node.queue_free()
 	cities.clear()
@@ -469,9 +472,12 @@ func _cleanup_run_nodes() -> void:
 	enemies.clear()
 	projectiles.clear()
 	pickups.clear()
+	settlement_buildings.clear()
 	effects.clear()
 	spawn_queue.clear()
 	dragging_weapon = null
+	next_settlement_building_id = 1
+	_cancel_building_placement()
 	if is_instance_valid(factory_world):
 		factory_world.queue_free()
 	factory_world = null
@@ -482,7 +488,6 @@ func _begin_wave(number: int) -> void:
 		return
 	phase = Phase.DEFENSE
 	current_wave = number
-	incoming_timer = 0.0
 	factory_view_active = false
 	if is_instance_valid(factory_world):
 		factory_world.begin_defense()
@@ -496,6 +501,8 @@ func _begin_wave(number: int) -> void:
 	spawn_timer = 0.35
 	spawn_finished = spawn_queue.is_empty()
 	defense_panel.visible = false
+	build_panel.visible = false
+	_cancel_building_placement()
 	upgrade_panel.visible = false
 	result_panel.visible = false
 	_show_banner("WAVE %d" % current_wave, 1.8)
@@ -701,58 +708,36 @@ func _check_wave_clear() -> void:
 	waves_cleared = current_wave
 	_collect_all_pickups()
 	_show_banner("WAVE CLEAR", 1.6)
-	_begin_preparation(false)
+	_begin_build()
+
+func _begin_build() -> void:
+	phase = Phase.BUILD
+	factory_view_active = false
+	_stop_combat_nodes()
+	_set_defense_nodes_visible(true)
+	hud.visible = true
+	factory_hud.visible = false
+	factory_inventory_ui.set_factory_visible(false)
+	engineering_ui.visible = false
+	defense_panel.visible = true
+	build_panel.visible = true
+	upgrade_panel.visible = false
+	_finish_drag()
+	_show_banner("BUILD PHASE", 1.2)
+	_refresh_defense_ui()
+	queue_redraw()
 
 func _begin_preparation(_first_preparation: bool = false) -> void:
-	phase = Phase.PREPARATION
-	factory_view_active = true
-	incoming_timer = 0.0
-	_stop_combat_nodes()
-	_set_defense_nodes_visible(false)
-	if is_instance_valid(factory_world):
-		factory_world.begin_preparation()
-		factory_world.set_factory_view(true)
-		factory_world.select_inventory_item(quickbar.selected_item_id())
-	hud.visible = false
-	factory_hud.visible = true
-	factory_inventory_ui.set_factory_visible(true)
-	defense_panel.visible = false
-	upgrade_panel.visible = false
-	_factory_message("PREPARATION — FACTORY PAUSED")
-	if not _first_preparation and current_wave >= 1:
-		research.reveal_project(ResearchProjects.MISSILE_LAUNCHER_DEVELOPMENT)
-	_update_factory_hud()
+	_begin_build()
 
 func _request_defense_transition(_reason: String = "manual") -> void:
-	if phase != Phase.PREPARATION or incoming_timer > 0.0:
+	if phase != Phase.BUILD:
 		return
-	pending_wave_number = maxi(1, current_wave + 1)
-	incoming_timer = 3.2
-	factory_view_active = true
-	if is_instance_valid(factory_world):
-		factory_world.transition_locked = true
-		factory_world.active_controls = false
-		factory_world.cancel_build()
-		factory_world.set_factory_view(true)
-	_set_defense_nodes_visible(false)
-	hud.visible = false
-	factory_hud.visible = true
-	factory_message_label.text = "INCOMING ATTACK"
+	_start_next_wave()
 
 func _toggle_preparation_view() -> void:
-	if phase != Phase.PREPARATION or incoming_timer > 0.0:
-		return
-	factory_view_active = not factory_view_active
-	factory_inventory_ui.close_inventory()
-	engineering_ui.visible = false
-	if is_instance_valid(factory_world):
-		factory_world.set_factory_view(factory_view_active)
-	_set_defense_nodes_visible(not factory_view_active)
-	factory_hud.visible = factory_view_active
-	factory_inventory_ui.set_factory_visible(factory_view_active)
-	hud.visible = not factory_view_active
-	defense_panel.visible = not factory_view_active
-	_refresh_defense_ui()
+	# Kept as a harmless compatibility hook for isolated legacy UI callbacks.
+	return
 
 func _set_defense_nodes_visible(value: bool) -> void:
 	for list in [cities, weapons, enemies, projectiles, pickups]:
@@ -794,7 +779,7 @@ func _choose_upgrade(index: int) -> void:
 		return
 	var upgrade_id: String = upgrade_buttons[index].get_meta("upgrade_id", "")
 	_apply_upgrade(upgrade_id)
-	_begin_preparation(false)
+	_begin_build()
 
 func _apply_upgrade(id: String) -> void:
 	if id.begins_with("missile_"):
@@ -822,6 +807,98 @@ func _add_charm(display_name: String) -> bool:
 			for city in cities: city.reinforce(20.0)
 	_refresh_defense_ui()
 	return true
+
+func _select_building_for_placement(stable_id: String) -> void:
+	if phase != Phase.BUILD:
+		return
+	var definition := BuildingCatalog.definition(stable_id)
+	if definition == null:
+		return
+	selected_building_id = stable_id
+	_update_build_preview(get_global_mouse_position())
+	build_status_label.text = "%s selected. LMB places; RMB/Esc cancels." % definition.display_name
+	queue_redraw()
+
+func _cancel_building_placement() -> void:
+	selected_building_id = ""
+	build_preview_valid = false
+	build_preview_reason = ""
+	if is_instance_valid(build_status_label):
+		build_status_label.text = "Select a building. LMB places; RMB/Esc cancels."
+		build_status_label.add_theme_color_override("font_color", Color("e8f0ff"))
+	queue_redraw()
+
+func _update_build_preview(mouse_position: Vector2) -> void:
+	if phase != Phase.BUILD or selected_building_id.is_empty():
+		return
+	var definition := BuildingCatalog.definition(selected_building_id)
+	build_preview_position = settlement_grid.snap_position(mouse_position, definition)
+	var validation := settlement_grid.validate(definition, build_preview_position, settlement_buildings, _settlement_protected_areas())
+	build_preview_valid = bool(validation.valid) and credits >= definition.cost
+	build_preview_reason = str(validation.reason)
+	if bool(validation.valid) and credits < definition.cost:
+		build_preview_reason = "Need %d credits" % definition.cost
+	build_status_label.text = "%s — %s" % [definition.display_name, build_preview_reason]
+	build_status_label.add_theme_color_override("font_color", Color("4de3a4") if build_preview_valid else Color("ff7185"))
+	queue_redraw()
+
+func _try_place_selected_building(requested_position: Vector2 = Vector2.INF) -> bool:
+	if phase != Phase.BUILD or selected_building_id.is_empty():
+		return false
+	var placement_position := get_global_mouse_position() if requested_position == Vector2.INF else requested_position
+	_update_build_preview(placement_position)
+	if not build_preview_valid:
+		_show_banner(build_preview_reason.to_upper(), 0.8)
+		return false
+	var definition := BuildingCatalog.definition(selected_building_id)
+	if credits < definition.cost:
+		return false
+	var building := definition.scene.instantiate() as BuildingInstance
+	if building == null:
+		build_status_label.text = "Building scene could not be created"
+		return false
+	add_child(building)
+	building.setup(next_settlement_building_id, definition, build_preview_position)
+	next_settlement_building_id += 1
+	settlement_buildings.append(building)
+	credits -= definition.cost
+	audio_cue_requested.emit("upgrade_purchase")
+	_show_banner("RESEARCH LAB BUILT", 0.9)
+	_update_build_preview(get_global_mouse_position())
+	_refresh_defense_ui()
+	return true
+
+func _settlement_protected_areas() -> Array[Rect2]:
+	var areas: Array[Rect2] = []
+	for city in cities:
+		if is_instance_valid(city):
+			areas.append(Rect2(city.position - Vector2(48, 50), Vector2(96, 70)))
+	for weapon in weapons:
+		if is_instance_valid(weapon) and weapon.unlocked:
+			areas.append(Rect2(weapon.position - Vector2(44, 52), Vector2(88, 72)))
+	return areas
+
+func _draw_settlement_grid() -> void:
+	var zone := SettlementBuildGrid.BUILD_ZONE
+	draw_rect(zone, Color(0.12, 0.32, 0.38, 0.18))
+	draw_rect(zone, Color("4b94a1"), false, 2.0)
+	var x := zone.position.x
+	while x <= zone.end.x:
+		draw_line(Vector2(x, zone.position.y), Vector2(x, zone.end.y), Color(0.35, 0.66, 0.72, 0.18), 1.0)
+		x += SettlementBuildGrid.GRID_SIZE
+	var y := zone.position.y
+	while y <= zone.end.y:
+		draw_line(Vector2(zone.position.x, y), Vector2(zone.end.x, y), Color(0.35, 0.66, 0.72, 0.18), 1.0)
+		y += SettlementBuildGrid.GRID_SIZE
+
+func _draw_build_preview() -> void:
+	if selected_building_id.is_empty():
+		return
+	var definition := BuildingCatalog.definition(selected_building_id)
+	var preview_rect := settlement_grid.footprint_rect(definition, build_preview_position).grow(-2.0)
+	var preview_color := Color(0.3, 1.0, 0.62, 0.30) if build_preview_valid else Color(1.0, 0.28, 0.38, 0.30)
+	draw_rect(preview_rect, preview_color)
+	draw_rect(preview_rect, Color(preview_color, 0.95), false, 3.0)
 
 func _begin_defense_click(mouse_position: Vector2) -> void:
 	for weapon in weapons:
@@ -915,9 +992,10 @@ func _buy_charm() -> void:
 	_refresh_defense_ui()
 
 func _start_next_wave() -> void:
-	if phase == Phase.PREPARATION:
+	if phase == Phase.BUILD:
 		_finish_drag()
-		_request_defense_transition("manual")
+		_cancel_building_placement()
+		_begin_wave(current_wave + 1)
 
 func _on_city_fell(_city) -> void:
 	audio_cue_requested.emit("city_destroyed")
@@ -957,6 +1035,8 @@ func _stop_combat_nodes() -> void:
 
 func _show_result(won: bool) -> void:
 	defense_panel.visible = false
+	build_panel.visible = false
+	_cancel_building_placement()
 	upgrade_panel.visible = false
 	pause_panel.visible = false
 	result_panel.visible = true
@@ -984,6 +1064,7 @@ func _show_menu() -> void:
 	if is_instance_valid(factory_inventory_ui): factory_inventory_ui.set_factory_visible(false)
 	if is_instance_valid(engineering_ui): engineering_ui.visible = false
 	defense_panel.visible = false
+	build_panel.visible = false
 	upgrade_panel.visible = false
 	pause_panel.visible = false
 	result_panel.visible = false
@@ -1009,18 +1090,23 @@ func _refresh_defense_ui() -> void:
 		return
 	selected_city_index = clampi(selected_city_index, 0, cities.size() - 1)
 	var city := cities[selected_city_index]
+	defense_title.text = "SETTLEMENT BUILD PHASE" if phase == Phase.BUILD else "COMMAND STATUS"
 	var shield_text := "none" if city.shield_max <= 0.0 else "%d / %d" % [int(city.shield_health), int(city.shield_max)]
 	defense_city_label.text = "CITY %d   HP %d / %d\nShield: %s" % [selected_city_index + 1, int(city.health), int(city.max_health), shield_text]
 	repair_button.disabled = credits < GameBalance.CITY_REPAIR_COST or city.destroyed or city.health >= city.max_health
 	shield_button.disabled = credits < GameBalance.SHIELD_COST or city.destroyed or city.shield_max > 0.0
-	gatling_button.disabled = false
-	gatling_button.text = "MISSILE LAUNCHER PLACED" if weapons[1].unlocked else "OPEN ENGINEERING PROJECTS"
+	gatling_button.disabled = true
+	gatling_button.text = "LEGACY ENGINEERING DISCONNECTED"
 	missile_upgrade_button.disabled = credits < GameBalance.WEAPON_UPGRADE_COST or not weapons[1].unlocked
 	gatling_upgrade_button.disabled = credits < GameBalance.WEAPON_UPGRADE_COST
 	charm_button.disabled = credits < GameBalance.CHARM_COST or charms.size() >= 3
 	defense_weapons_label.text = "Basic MG: %s\nMissile: %s" % [", ".join(weapons[0].upgrade_labels) if not weapons[0].upgrade_labels.is_empty() else "base", ", ".join(weapons[1].upgrade_labels) if not weapons[1].upgrade_labels.is_empty() else ("base" if weapons[1].unlocked else "locked")]
 	defense_charms_label.text = "Charms: %s" % (", ".join(charms) if not charms.is_empty() else "none")
 	next_wave_button.text = "START WAVE %d" % (current_wave + 1)
+	next_wave_button.disabled = phase != Phase.BUILD
+	var lab_definition := BuildingCatalog.definition(BuildingCatalog.RESEARCH_LAB_ID)
+	research_lab_button.text = "[LAB]  RESEARCH LAB  —  %d" % lab_definition.cost
+	research_lab_button.disabled = phase != Phase.BUILD or credits < lab_definition.cost
 
 func _update_hud() -> void:
 	if not hud.visible or cities.is_empty() or weapons.is_empty():
@@ -1080,7 +1166,7 @@ func _factory_message(text_value: String, duration: float = 1.4) -> void:
 	factory_message_left = duration
 
 func _factory_build(kind_id: String) -> void:
-	if phase == Phase.PREPARATION and factory_view_active and is_instance_valid(factory_world):
+	if phase == Phase.BUILD and factory_view_active and is_instance_valid(factory_world):
 		quickbar.deselect()
 		factory_world.select_build(kind_id)
 
@@ -1096,17 +1182,17 @@ func _on_factory_weapon_selected(index: int) -> void:
 
 
 func _on_quickbar_selected(item_id: String, _slot_index: int) -> void:
-	if phase == Phase.PREPARATION and factory_view_active and is_instance_valid(factory_world):
+	if phase == Phase.BUILD and factory_view_active and is_instance_valid(factory_world):
 		factory_world.select_inventory_item(item_id)
 
 
 func _on_factory_modal_visibility_changed(is_open: bool) -> void:
 	if is_instance_valid(factory_world):
-		factory_world.active_controls = phase == Phase.PREPARATION and factory_view_active and not is_open and not engineering_ui.visible and not factory_world.transition_locked
+		factory_world.active_controls = phase == Phase.BUILD and factory_view_active and not is_open and not engineering_ui.visible and not factory_world.transition_locked
 
 
 func _open_engineering() -> void:
-	if phase != Phase.PREPARATION:
+	if phase != Phase.BUILD or not factory_view_active:
 		return
 	if not factory_view_active:
 		_toggle_preparation_view()
@@ -1194,8 +1280,8 @@ func _debug_damage_selected() -> void:
 func _debug_jump_to_factory() -> void:
 	if phase == Phase.MENU or phase == Phase.VICTORY or phase == Phase.DEFEAT:
 		return
-	_begin_preparation(false)
-	_factory_message("DEBUG PREPARATION")
+	_begin_build()
+	_show_banner("DEBUG BUILD PHASE")
 
 func _load_save() -> void:
 	if not FileAccess.file_exists(SAVE_PATH):
